@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 2 – Goroutine + Concurrency (Deep Dive) | Senior Go Interview</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Golang knowledge</div></a>
+      <div class="sub">Deep Dive</div>
+    </div>
+    <h2>Week 2 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#goroutine">1. Goroutine vs Thread</a>
+      <a href="#gmp">2. GMP Model</a>
+      <a href="#scheduler">3. Scheduler &amp; Preemption</a>
+      <a href="#channel">4. Channel Internals</a>
+      <a href="#select">5. Select</a>
+      <a href="#sync">6. Sync Primitives</a>
+      <a href="#atomic">7. Atomic &amp; Memory Model</a>
+      <a href="#patterns">8. Concurrency Patterns</a>
+      <a href="#problems">9. Race / Deadlock / Leak</a>
+      <a href="#mutexvschan">10. Mutex vs Channel</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html">Week 1 · Go Core</a>
+      <a href="week2.html" class="active">Week 2 · Concurrency</a>
+      <a href="week3.html">Week 3 · Runtime</a>
+      <a href="week4.html">Week 4 · Backend</a>
+      <a href="week5.html">Week 5 · DB/Redis/MQ</a>
+      <a href="week6.html">Week 6 · Distributed</a>
+      <a href="week7.html">Week 7 · System Design</a>
+      <a href="week8.html">Week 8 · Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 2 · Deep Dive</span>
+      <h1>Goroutine + Concurrency</h1>
+      <p>Trái tim của Go: mô hình GMP, scheduler user-space, channel, và các primitive đồng bộ. Hiểu cơ chế ẩn để trả lời "điều gì xảy ra khi goroutine bị block".</p>
+      <div class="meta">
+        <div class="item"><b>★★★★★</b><span>Priority</span></div>
+        <div class="item"><b>10</b><span>Chủ đề sâu</span></div>
+        <div class="item"><b>~15h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <p>Concurrency là điểm bán hàng lớn nhất của Go. Thay vì thread OS nặng nề, Go dùng <strong>goroutine</strong> (nhẹ, ~2KB) được <strong>scheduler user-space</strong> ghép lên số ít OS thread (mô hình M:N). Triết lý: <em>"Don't communicate by sharing memory; share memory by communicating"</em> — nhưng thực dụng thì dùng mutex khi rõ ràng hơn.</p>
+      <div class="tldr">
+        <div class="label">TL;DR — phải nắm chắc</div>
+        <ul>
+          <li>Goroutine ~2KB stack, tạo/switch rẻ hơn thread OS hàng chục–trăm lần.</li>
+          <li><strong>GMP:</strong> G (goroutine) chạy trên M (OS thread) được điều phối bởi P (logical processor, = GOMAXPROCS).</li>
+          <li>Mỗi P có <strong>local run queue</strong> (LRQ, tối đa 256); dư thì đẩy vào <strong>global queue</strong>.</li>
+          <li><strong>Work stealing:</strong> P rảnh trộm nửa hàng đợi của P khác.</li>
+          <li>Syscall block → M tách khỏi P, P tìm M khác chạy tiếp; network I/O dùng <strong>netpoller</strong> không block M.</li>
+          <li>Preemption bất đồng bộ (Go 1.14+) qua signal → tight loop cũng bị ngắt.</li>
+          <li>Channel: unbuffered = điểm đồng bộ; buffered = hàng đợi ring có capacity.</li>
+          <li>Send/recv trên nil channel = block mãi; send trên closed = panic; recv trên closed = zero value.</li>
+          <li>Mutex không reentrant; RWMutex ưu tiên writer; Once chạy đúng 1 lần.</li>
+          <li>Không đồng bộ = không đảm bảo happens-before (Go memory model).</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 1. GOROUTINE VS THREAD -->
+    <section id="goroutine">
+      <h2 class="section-title"><span class="num">1</span> Goroutine vs OS Thread</h2>
+      <table>
+        <tr><th>Tiêu chí</th><th>OS Thread</th><th>Goroutine</th></tr>
+        <tr><td>Stack ban đầu</td><td>1–8 MB (cố định)</td><td>~2 KB (grow động)</td></tr>
+        <tr><td>Chi phí tạo</td><td>~1 ms</td><td>~1 µs</td></tr>
+        <tr><td>Context switch</td><td>~1–10 µs (kernel)</td><td>~200 ns (user-space)</td></tr>
+        <tr><td>Ai điều phối</td><td>OS kernel</td><td>Go runtime scheduler</td></tr>
+        <tr><td>Số lượng khả thi</td><td>hàng nghìn</td><td>hàng triệu</td></tr>
+      </table>
+      <div class="block why">
+        <div class="block-label">Tại sao goroutine rẻ hơn nhiều</div>
+        <ul>
+          <li><strong>Stack nhỏ, growable:</strong> không cần cấp trước MB như thread OS.</li>
+          <li><strong>Switch trong user-space:</strong> chỉ lưu vài register (PC, SP), không cần syscall vào kernel → không flush TLB, không đổi page table.</li>
+          <li><strong>Scheduler biết ngữ cảnh Go:</strong> chỉ switch tại điểm an toàn (function call, channel op), rẻ hơn preempt tùy tiện của OS.</li>
+        </ul>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Hiểu nhầm phổ biến</div>
+        <p>Goroutine KHÔNG phải "thread nhẹ chạy song song thật". Với <code>GOMAXPROCS=1</code>, hàng triệu goroutine vẫn chạy <strong>concurrent</strong> (xen kẽ) chứ không <strong>parallel</strong> (đồng thời trên nhiều core). Concurrency ≠ parallelism.</p>
+      </div>
+    </section>
+
+    <!-- 2. GMP -->
+    <section id="gmp">
+      <h2 class="section-title"><span class="num">2</span> GMP Model</h2>
+      <p>Ba thành phần cốt lõi của scheduler:</p>
+      <div class="kv-grid">
+        <div class="kv"><div class="k">G — Goroutine</div><div class="v">unit of work</div></div>
+        <div class="kv"><div class="k">M — Machine</div><div class="v">OS thread</div></div>
+        <div class="kv"><div class="k">P — Processor</div><div class="v">logical CPU</div></div>
+      </div>
+
+      <div class="dg">
+        <div class="dg-title">GOMAXPROCS = số P (mặc định = số CPU core)</div>
+        <div class="dg-row top dg-gap-lg scroll">
+          <!-- P0 -->
+          <div class="dg-col">
+            <div class="dg-group">
+              <span class="grp-label">P0 · local run queue</span>
+              <div class="cells">
+                <span class="cell fill">G</span><span class="cell fill">G</span><span class="cell fill">G</span><span class="cell empty">…</span>
+              </div>
+              <span class="sub" style="font-size:11px;color:var(--text-dim)">≤ 256 goroutine</span>
+            </div>
+            <div class="arrow-v acc"></div>
+            <span class="arrow-lbl">gắn (bind)</span>
+            <div class="node accent">M0<span class="sub">OS thread</span></div>
+            <div class="arrow-v"></div>
+            <div class="node green sm">chạy G hiện tại</div>
+          </div>
+
+          <!-- P1 -->
+          <div class="dg-col">
+            <div class="dg-group">
+              <span class="grp-label">P1 · local run queue</span>
+              <div class="cells">
+                <span class="cell fill">G</span><span class="cell fill">G</span><span class="cell empty">…</span>
+              </div>
+              <span class="sub" style="font-size:11px;color:var(--text-dim)">mcache riêng (no lock)</span>
+            </div>
+            <div class="arrow-v acc"></div>
+            <span class="arrow-lbl">gắn (bind)</span>
+            <div class="node accent">M1<span class="sub">OS thread</span></div>
+            <div class="arrow-v"></div>
+            <div class="node green sm">chạy G hiện tại</div>
+          </div>
+
+          <!-- Global + netpoller -->
+          <div class="dg-col">
+            <div class="dg-group">
+              <span class="grp-label">Global Run Queue</span>
+              <div class="cells">
+                <span class="cell fill">G</span><span class="cell fill">G</span><span class="cell fill">G</span><span class="cell fill">G</span><span class="cell empty">…</span>
+              </div>
+              <span class="sub" style="font-size:11px;color:var(--text-dim)">dư từ LRQ đẩy vào · P rảnh lấy ra</span>
+            </div>
+            <div class="arrow-v"></div>
+            <div class="dg-group">
+              <span class="grp-label">Network Poller (epoll/kqueue)</span>
+              <div class="cells">
+                <span class="cell hot">G</span><span class="cell hot">G</span>
+              </div>
+              <span class="sub" style="font-size:11px;color:var(--text-dim)">G chờ I/O mạng (M không bị block)</span>
+            </div>
+          </div>
+        </div>
+        <div class="dg-legend">
+          <span class="lg"><span class="sw green"></span> G runnable</span>
+          <span class="lg"><span class="sw accent"></span> M (OS thread)</span>
+          <span class="lg"><span class="sw orange"></span> G chờ I/O</span>
+        </div>
+      </div>
+
+      <div class="block how">
+        <div class="block-label">Vai trò từng thành phần</div>
+        <ul>
+          <li><strong>G:</strong> chứa stack, program counter, trạng thái (_Grunnable, _Grunning, _Gwaiting, _Gsyscall, _Gdead).</li>
+          <li><strong>M:</strong> OS thread thật; muốn chạy G phải "gắn" (bind) với một P. Số M không bị GOMAXPROCS giới hạn (có thể tạo thêm khi bị block syscall).</li>
+          <li><strong>P:</strong> tài nguyên logic để thực thi; giữ LRQ và một <strong>mcache</strong> (cấp phát bộ nhớ không cần lock). Số P = GOMAXPROCS.</li>
+        </ul>
+      </div>
+      <div class="block why">
+        <div class="block-label">Tại sao cần P (không chỉ G và M)?</div>
+        <p>P là tầng trung gian tách "công việc" khỏi "thread". Nhờ có P: (1) mỗi P có LRQ riêng → giảm tranh chấp lock trên global queue; (2) mcache gắn với P → cấp phát bộ nhớ nhanh không lock; (3) khi M block syscall, P có thể "nhảy" sang M khác để tiếp tục chạy goroutine → không lãng phí CPU.</p>
+      </div>
+    </section>
+
+    <!-- 3. SCHEDULER -->
+    <section id="scheduler">
+      <h2 class="section-title"><span class="num">3</span> Scheduler: Work Stealing, Syscall, Preemption</h2>
+
+      <h3>Vòng đời lập lịch</h3>
+      <div class="steps">
+        <div class="step"><div class="step-title">Goroutine mới</div>Đặt vào LRQ của P hiện tại (nếu đầy → chuyển nửa sang global queue).</div>
+        <div class="step"><div class="step-title">P lấy G để chạy</div>Ưu tiên LRQ. Thỉnh thoảng lấy từ global queue (tránh đói).</div>
+        <div class="step"><div class="step-title">LRQ rỗng → work stealing</div>Kiểm tra global queue → netpoller → trộm nửa LRQ của P ngẫu nhiên khác.</div>
+        <div class="step"><div class="step-title">Không còn việc</div>M bị park (ngủ) cho tới khi có G mới.</div>
+      </div>
+
+      <h3>Work Stealing</h3>
+      <div class="dg">
+        <div class="dg-title">P0 hết việc → tìm việc theo thứ tự ưu tiên, cuối cùng trộm nửa LRQ của P1</div>
+        <div class="dg-row top dg-gap-lg">
+          <div class="dg-group">
+            <span class="grp-label">P0 — trước (rỗng)</span>
+            <div class="cells"><span class="cell empty">·</span><span class="cell empty">·</span><span class="cell empty">·</span><span class="cell empty">·</span></div>
+          </div>
+          <div class="dg-col">
+            <span class="arrow-lbl">1. global queue? không &nbsp; 2. netpoller? không &nbsp; 3. trộm nửa P1</span>
+            <div class="arrow-h" style="width:160px"></div>
+          </div>
+          <div class="dg-group">
+            <span class="grp-label">P1 — bận (đầy)</span>
+            <div class="cells"><span class="cell fill">G</span><span class="cell fill">G</span><span class="cell fill">G</span><span class="cell fill">G</span><span class="cell fill">G</span><span class="cell fill">G</span><span class="cell fill">G</span><span class="cell fill">G</span></div>
+          </div>
+        </div>
+        <div class="arrow-v grn" style="margin:14px auto"></div>
+        <div class="dg-row dg-gap-lg">
+          <div class="dg-group">
+            <span class="grp-label">P0 — sau (lấy 4 G)</span>
+            <div class="cells"><span class="cell fill">G</span><span class="cell fill">G</span><span class="cell fill">G</span><span class="cell fill">G</span></div>
+          </div>
+          <div class="node muted sm">chuyển nửa →</div>
+          <div class="dg-group">
+            <span class="grp-label">P1 — sau (còn 4 G)</span>
+            <div class="cells"><span class="cell fill">G</span><span class="cell fill">G</span><span class="cell fill">G</span><span class="cell fill">G</span></div>
+          </div>
+        </div>
+        <div class="dg-note">Cân bằng tải tự động, tận dụng mọi core mà không cần điều phối tập trung.</div>
+      </div>
+      <div class="block why">
+        <div class="block-label">Tại sao trộm "nửa"?</div>
+        <p>Trộm nửa (chứ không phải 1 hay tất cả) để cân bằng: nếu chỉ lấy 1, P rảnh sẽ phải trộm liên tục (nhiều lần đồng bộ tốn kém); nếu lấy tất cả, P bị trộm lại thành rỗng ngay. Lấy nửa là điểm cân bằng tối ưu.</p>
+      </div>
+
+      <h3>Syscall Handling — cơ chế handoff</h3>
+      <div class="dg">
+        <div class="dg-grid" style="grid-template-columns:1fr;gap:22px">
+          <!-- state 1 -->
+          <div>
+            <div class="dg-title" style="margin-bottom:10px">1 · Trước syscall — G0 chạy trên M0, M0 gắn P0</div>
+            <div class="dg-row">
+              <div class="node accent">P0</div>
+              <div class="arrow-h" style="width:40px"></div>
+              <div class="node accent">M0</div>
+              <div class="arrow-h" style="width:40px"></div>
+              <div class="node green">G0<span class="sub">đang chạy</span></div>
+            </div>
+          </div>
+          <!-- state 2 -->
+          <div>
+            <div class="dg-title" style="margin-bottom:10px">2 · G0 gọi syscall blocking → M0 kẹt, P0 TÁCH ra gắn M khác</div>
+            <div class="dg-row dg-gap-lg">
+              <div class="dg-row">
+                <div class="node red">M0<span class="sub">kẹt cùng G0</span></div>
+              </div>
+              <div class="node muted sm">P0 rời M0 →</div>
+              <div class="dg-row">
+                <div class="node accent">P0</div>
+                <div class="arrow-h" style="width:36px"></div>
+                <div class="node accent">M1<span class="sub">mới/pool</span></div>
+                <div class="arrow-h" style="width:36px"></div>
+                <div class="node green">G1, G2…<span class="sub">chạy tiếp</span></div>
+              </div>
+            </div>
+          </div>
+          <!-- state 3 -->
+          <div>
+            <div class="dg-title" style="margin-bottom:10px">3 · Sau syscall — M0 cố lấy lại một P</div>
+            <div class="dg-note" style="margin-top:0">Có P rảnh → M0 chạy tiếp G0. Không có P → G0 vào run queue, M0 ngủ (park).</div>
+          </div>
+        </div>
+      </div>
+      <div class="block how">
+        <div class="block-label">Network I/O khác gì syscall thường</div>
+        <p>Network I/O KHÔNG block M. Runtime dùng <strong>netpoller</strong> (epoll trên Linux, kqueue trên BSD/macOS, IOCP trên Windows). Goroutine chờ I/O bị <em>park</em>, M được giải phóng chạy goroutine khác. Khi socket sẵn sàng, netpoller đánh thức goroutine và đưa lại vào run queue. Đây là lý do Go xử lý được hàng trăm nghìn kết nối mạng đồng thời với ít thread.</p>
+      </div>
+
+      <h3>Preemption — cooperative → asynchronous</h3>
+      <div class="grid-2">
+        <div class="col">
+          <h4>Go &lt; 1.14: Cooperative</h4>
+          <p>Goroutine chỉ nhường CPU tại "safe point" (function call). <strong>Vấn đề:</strong> vòng lặp chặt không gọi hàm → không bao giờ nhường → có thể treo GC (STW chờ mãi).</p>
+        </div>
+        <div class="col">
+          <h4>Go ≥ 1.14: Asynchronous</h4>
+          <p>Runtime gửi signal <code>SIGURG</code> tới M đang chạy G lâu → chèn preemption ngay cả trong tight loop. Giải quyết triệt để vấn đề latency GC.</p>
+        </div>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Câu hỏi bẫy trước 1.14</div>
+        <p><code>for {}</code> (loop rỗng) trên GOMAXPROCS=1 có thể treo toàn chương trình ở Go cũ vì không có preemption point. Từ 1.14 thì bị preempt bình thường. Interview có thể hỏi phiên bản.</p>
+      </div>
+    </section>
+
+    <!-- 4. CHANNEL -->
+    <section id="channel">
+      <h2 class="section-title"><span class="num">4</span> Channel Internals</h2>
+      <div class="concept">
+        <div class="concept-head">Cấu trúc hchan</div>
+        <div class="concept-body">
+          <pre><code><span class="tok-kw">type</span> <span class="tok-type">hchan</span> <span class="tok-kw">struct</span> {
+    qcount   <span class="tok-type">uint</span>           <span class="tok-com">// số phần tử trong buffer</span>
+    dataqsiz <span class="tok-type">uint</span>           <span class="tok-com">// capacity của buffer (0 nếu unbuffered)</span>
+    buf      unsafe.Pointer <span class="tok-com">// ring buffer</span>
+    sendx    <span class="tok-type">uint</span>           <span class="tok-com">// vị trí ghi kế tiếp</span>
+    recvx    <span class="tok-type">uint</span>           <span class="tok-com">// vị trí đọc kế tiếp</span>
+    recvq    waitq          <span class="tok-com">// hàng đợi goroutine đang chờ nhận</span>
+    sendq    waitq          <span class="tok-com">// hàng đợi goroutine đang chờ gửi</span>
+    lock     mutex          <span class="tok-com">// bảo vệ toàn bộ hchan</span>
+}</code></pre>
+        </div>
+      </div>
+
+      <h3>Unbuffered — điểm đồng bộ (rendezvous)</h3>
+      <div class="dg">
+        <div class="dg-title"><code>ch := make(chan int)</code> — dataqsiz = 0, không buffer</div>
+        <div class="dg-row dg-gap-lg top">
+          <div class="dg-group" style="border-color:var(--accent-2)">
+            <span class="grp-label" style="color:var(--accent-2)">Có receiver đang chờ</span>
+            <div class="dg-row">
+              <div class="node green">Sender<span class="sub">ch &lt;- 42</span></div>
+              <div class="arrow-h grn" style="width:70px"></div>
+              <div class="node green">Receiver<span class="sub">x := &lt;-ch</span></div>
+            </div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)">copy 42 TRỰC TIẾP stack→stack, đánh thức cả hai</span>
+          </div>
+          <div class="dg-group" style="border-color:var(--accent-3)">
+            <span class="grp-label" style="color:var(--accent-3)">Không có receiver</span>
+            <div class="dg-row">
+              <div class="node orange">Sender</div>
+              <div class="arrow-h" style="width:50px"></div>
+              <div class="node muted">sendq<span class="sub">park chờ</span></div>
+            </div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)">sender bị park tới khi có receiver</span>
+          </div>
+        </div>
+        <div class="dg-note"><strong>Rendezvous:</strong> send và recv gặp nhau trực tiếp, không qua buffer → tạo happens-before guarantee.</div>
+      </div>
+
+      <h3>Buffered — ring buffer</h3>
+      <div class="dg">
+        <div class="dg-title"><code>ch := make(chan int, 4)</code> — ring buffer capacity 4, qcount=2</div>
+        <div class="dg-wrap">
+          <div class="cells" style="gap:6px">
+            <span class="cell fill">10</span>
+            <span class="cell fill">20</span>
+            <span class="cell empty">·</span>
+            <span class="cell empty">·</span>
+          </div>
+          <div class="dg-row" style="gap:0;width:100%;max-width:220px;justify-content:space-between">
+            <span class="arrow-lbl" style="color:var(--accent-2)">↑ recvx=0 (đọc)</span>
+            <span class="arrow-lbl" style="color:var(--accent-3)">↑ sendx=2 (ghi)</span>
+          </div>
+        </div>
+        <div class="dg-row dg-gap-lg" style="margin-top:16px">
+          <div class="dg-col left" style="align-items:flex-start">
+            <span class="arrow-lbl"><strong style="color:var(--accent-3)">SEND</strong> · buf chưa đầy → ghi buf[sendx], sendx++ (vòng), qcount++</span>
+            <span class="arrow-lbl">buf đầy → sender park vào sendq</span>
+          </div>
+          <div class="dg-col left" style="align-items:flex-start">
+            <span class="arrow-lbl"><strong style="color:var(--accent-2)">RECV</strong> · buf không rỗng → đọc buf[recvx], recvx++ (vòng), qcount--</span>
+            <span class="arrow-lbl">buf rỗng → receiver park vào recvq</span>
+          </div>
+        </div>
+      </div>
+
+      <h3>Bảng hành vi send / recv / close</h3>
+      <table>
+        <tr><th>Thao tác</th><th>nil channel</th><th>channel mở, sẵn sàng</th><th>channel mở, chưa sẵn sàng</th><th>closed channel</th></tr>
+        <tr><td>Send <code>ch&lt;-x</code></td><td>block mãi</td><td>gửi thành công</td><td>block</td><td><strong>panic</strong></td></tr>
+        <tr><td>Recv <code>&lt;-ch</code></td><td>block mãi</td><td>nhận giá trị</td><td>block</td><td>zero value, ok=false</td></tr>
+        <tr><td>Close</td><td><strong>panic</strong></td><td colspan="2">đóng, đánh thức mọi waiter</td><td><strong>panic</strong> (double close)</td></tr>
+      </table>
+      <div class="block why">
+        <div class="block-label">Tại sao send-on-closed panic nhưng recv-on-closed thì không?</div>
+        <p>Đóng channel nghĩa là "không còn dữ liệu nào được gửi nữa". Recv sau close cần vẫn hoạt động để consumer đọc hết phần còn lại trong buffer rồi nhận tín hiệu kết thúc (ok=false) — nền tảng của <code>for range ch</code>. Nhưng gửi vào channel đã đóng là lỗi logic nghiêm trọng (vi phạm hợp đồng) nên panic để lộ bug sớm.</p>
+      </div>
+      <div class="block best">
+        <div class="block-label">Nguyên tắc đóng channel</div>
+        <ul>
+          <li><strong>Chỉ sender đóng channel</strong>, không bao giờ receiver (receiver không biết có sender khác không).</li>
+          <li>Nhiều sender → dùng <code>sync.WaitGroup</code> + một goroutine điều phối đóng, hoặc dùng done channel riêng.</li>
+          <li>Không cần đóng mọi channel — channel được GC như biến thường. Đóng chỉ để báo hiệu "hết dữ liệu".</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 5. SELECT -->
+    <section id="select">
+      <h2 class="section-title"><span class="num">5</span> Select Statement</h2>
+      <pre><code><span class="tok-kw">select</span> {
+<span class="tok-kw">case</span> msg := &lt;-ch1:        <span class="tok-com">// nhận từ ch1</span>
+<span class="tok-kw">case</span> ch2 &lt;- data:         <span class="tok-com">// gửi vào ch2</span>
+<span class="tok-kw">case</span> &lt;-time.<span class="tok-fn">After</span>(<span class="tok-num">5</span>*time.Second): <span class="tok-com">// timeout</span>
+<span class="tok-kw">default</span>:                  <span class="tok-com">// không block nếu không case nào sẵn sàng</span>
+}</code></pre>
+      <div class="block how">
+        <div class="block-label">Cơ chế chọn case</div>
+        <ul>
+          <li>Nếu <strong>nhiều case sẵn sàng</strong> → chọn <strong>ngẫu nhiên</strong> (pseudo-random) để đảm bảo fairness, tránh starvation.</li>
+          <li>Có <code>default</code> → select không block: nếu không case nào sẵn sàng, chạy default ngay.</li>
+          <li>Không <code>default</code> → block tới khi ít nhất một case sẵn sàng.</li>
+          <li><strong>nil channel trong case → case đó bị bỏ qua</strong> (không bao giờ được chọn).</li>
+        </ul>
+      </div>
+      <div class="block purpose">
+        <div class="block-label">Thủ thuật: nil channel để bật/tắt case động</div>
+        <pre><code><span class="tok-kw">var</span> in, out <span class="tok-kw">chan</span> <span class="tok-type">int</span> <span class="tok-com">// out = nil ban đầu</span>
+<span class="tok-kw">for</span> {
+    <span class="tok-kw">select</span> {
+    <span class="tok-kw">case</span> v := &lt;-in:
+        buffer = <span class="tok-fn">append</span>(buffer, v)
+        out = outCh <span class="tok-com">// bật case send khi có dữ liệu</span>
+    <span class="tok-kw">case</span> out &lt;- buffer[<span class="tok-num">0</span>]: <span class="tok-com">// case này bị bỏ qua khi out==nil</span>
+        buffer = buffer[<span class="tok-num">1</span>:]
+        <span class="tok-kw">if</span> <span class="tok-fn">len</span>(buffer)==<span class="tok-num">0</span> { out = <span class="tok-kw">nil</span> } <span class="tok-com">// tắt lại</span>
+    }
+}</code></pre>
+      </div>
+    </section>
+
+    <!-- 6. SYNC -->
+    <section id="sync">
+      <h2 class="section-title"><span class="num">6</span> Sync Primitives</h2>
+
+      <h3>sync.Mutex — không reentrant</h3>
+      <div class="block how">
+        <div class="block-label">Cơ chế: starvation mode</div>
+        <p>Mutex Go có 2 chế độ. <strong>Normal mode:</strong> waiter xếp hàng FIFO nhưng goroutine mới tới có thể "cướp" lock (nhanh hơn vì đang chạy trên CPU) → throughput cao. <strong>Starvation mode:</strong> nếu một waiter chờ &gt; 1ms, mutex chuyển sang trao lock trực tiếp cho waiter đầu hàng → công bằng, tránh đói. Đây là cân bằng giữa hiệu năng và công bằng.</p>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Bẫy Mutex</div>
+        <ul>
+          <li><strong>Không reentrant:</strong> cùng goroutine Lock 2 lần → deadlock. Go cố ý không hỗ trợ (giữ mã đơn giản, tường minh).</li>
+          <li><strong>Không copy sau khi dùng:</strong> copy mutex tạo bản sao độc lập → mất đồng bộ. Luôn truyền qua pointer. <code>go vet</code> phát hiện.</li>
+          <li>Luôn <code>defer mu.Unlock()</code> ngay sau Lock.</li>
+        </ul>
+      </div>
+
+      <h3>sync.RWMutex — nhiều reader hoặc một writer</h3>
+      <div class="dg">
+        <div class="dg-row dg-gap-lg top">
+          <div class="dg-group" style="border-color:var(--accent-2)">
+            <span class="grp-label" style="color:var(--accent-2)">RLock() — nhiều reader song song</span>
+            <div class="dg-row">
+              <div class="node green sm">reader1</div>
+              <div class="node green sm">reader2</div>
+              <div class="node green sm">reader3</div>
+            </div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)">chia sẻ đọc, không chặn nhau</span>
+          </div>
+          <div class="dg-group" style="border-color:var(--danger)">
+            <span class="grp-label" style="color:var(--danger)">Lock() — một writer độc quyền</span>
+            <div class="node red">writer</div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)">chờ mọi reader xong, chặn reader mới</span>
+          </div>
+        </div>
+        <div class="dg-note"><strong>Ưu tiên writer:</strong> khi writer đang chờ, reader MỚI bị chặn → tránh writer starvation.</div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Khi nào dùng RWMutex</div>
+        <p>Chỉ khi <strong>đọc nhiều hơn ghi rõ rệt</strong> VÀ critical section đủ dài. Với critical section ngắn, RWMutex có thể chậm hơn Mutex thường do overhead theo dõi reader count. Đo trước khi chọn.</p>
+      </div>
+
+      <h3>sync.WaitGroup, Once, Cond</h3>
+      <table>
+        <tr><th>Primitive</th><th>Mục đích</th><th>Cơ chế / lưu ý</th></tr>
+        <tr><td><code>WaitGroup</code></td><td>Chờ N goroutine xong</td><td><code>Add</code> phải gọi TRƯỚC <code>go</code>; <code>Done</code>=Add(-1); counter âm → panic</td></tr>
+        <tr><td><code>Once</code></td><td>Chạy đúng 1 lần</td><td>Dùng atomic + mutex bên trong; nếu func panic vẫn coi là "đã chạy"</td></tr>
+        <tr><td><code>Cond</code></td><td>Chờ điều kiện, đánh thức</td><td><code>Wait</code> phải trong loop (spurious wakeup); <code>Signal</code>(1) vs <code>Broadcast</code>(tất cả)</td></tr>
+      </table>
+      <div class="block pitfall">
+        <div class="block-label">Bẫy WaitGroup</div>
+        <pre><code><span class="tok-com">// SAI: Add bên trong goroutine → race, Wait có thể qua sớm</span>
+<span class="tok-kw">go</span> <span class="tok-kw">func</span>(){ wg.<span class="tok-fn">Add</span>(<span class="tok-num">1</span>); ... }()
+<span class="tok-com">// ĐÚNG: Add trước khi go</span>
+wg.<span class="tok-fn">Add</span>(<span class="tok-num">1</span>)
+<span class="tok-kw">go</span> <span class="tok-kw">func</span>(){ <span class="tok-kw">defer</span> wg.<span class="tok-fn">Done</span>(); ... }()</code></pre>
+      </div>
+    </section>
+
+    <!-- 7. ATOMIC & MEMORY MODEL -->
+    <section id="atomic">
+      <h2 class="section-title"><span class="num">7</span> Atomic &amp; Go Memory Model</h2>
+      <h3>sync/atomic — lock-free</h3>
+      <table>
+        <tr><th>Thao tác</th><th>Ý nghĩa</th></tr>
+        <tr><td><code>atomic.AddInt64(&amp;n, 1)</code></td><td>Tăng nguyên tử</td></tr>
+        <tr><td><code>atomic.LoadInt64(&amp;n)</code></td><td>Đọc nguyên tử</td></tr>
+        <tr><td><code>atomic.CompareAndSwap</code> (CAS)</td><td>So sánh &amp; hoán đổi nếu khớp — nền tảng lock-free</td></tr>
+        <tr><td><code>atomic.Value</code> / <code>atomic.Pointer[T]</code></td><td>Load/Store bất kỳ type nguyên tử</td></tr>
+      </table>
+      <div class="block how">
+        <div class="block-label">CAS hoạt động thế nào &amp; ABA problem</div>
+        <p><code>CAS(addr, old, new)</code>: nếu <code>*addr==old</code> thì gán <code>*addr=new</code>, trả true; ngược lại trả false. Dùng trong vòng lặp retry để cập nhật không lock. <strong>ABA problem:</strong> giá trị đổi A→B→A giữa chừng, CAS tưởng không đổi. Trong Go ít gặp do GC, nhưng cần biết khi làm lock-free struct.</p>
+      </div>
+      <div class="block best">
+        <div class="block-label">Atomic vs Mutex</div>
+        <p>Atomic cho <strong>một word</strong> (counter, flag, pointer swap) → nhanh, không deadlock. Mutex cho <strong>nhiều biến / logic phức tạp</strong> (read-modify-write trên nhiều field). Đừng dùng atomic để "tối ưu" logic đáng lẽ cần mutex — dễ sinh bug tinh vi.</p>
+      </div>
+
+      <h3>Go Memory Model — happens-before</h3>
+      <div class="block why">
+        <div class="block-label">Tại sao cần hiểu memory model</div>
+        <p>Không có đồng bộ, compiler và CPU được phép <strong>sắp xếp lại</strong> lệnh và cache ghi cục bộ. Nên goroutine A ghi biến <code>x</code> rồi <code>done=true</code>, goroutine B thấy <code>done==true</code> nhưng <strong>chưa chắc thấy giá trị mới của x</strong>. Đây là nguồn của data race tinh vi.</p>
+      </div>
+      <div class="dg">
+        <div class="dg-title">Các quan hệ happens-before (A → B nghĩa là mọi ghi của A đều thấy được ở B)</div>
+        <div class="dg-wrap" style="gap:10px">
+          <div class="dg-row"><div class="node green wide">channel send</div><div class="arrow-h grn" style="width:80px"></div><div class="node accent wide">recv tương ứng</div></div>
+          <div class="dg-row"><div class="node green wide">channel close</div><div class="arrow-h grn" style="width:80px"></div><div class="node accent wide">recv nhận zero value</div></div>
+          <div class="dg-row"><div class="node green wide">Unlock(mu)</div><div class="arrow-h grn" style="width:80px"></div><div class="node accent wide">Lock(mu) kế tiếp</div></div>
+          <div class="dg-row"><div class="node green wide">once.Do(f) xong</div><div class="arrow-h grn" style="width:80px"></div><div class="node accent wide">mọi once.Do sau đó</div></div>
+          <div class="dg-row"><div class="node green wide">ghi trước <code>go</code></div><div class="arrow-h grn" style="width:80px"></div><div class="node accent wide">goroutine mới bắt đầu</div></div>
+        </div>
+        <div class="dg-note">Không có quan hệ happens-before = không đảm bảo thấy được = phải đồng bộ bằng channel / mutex / atomic.</div>
+      </div>
+    </section>
+
+    <!-- 8. PATTERNS -->
+    <section id="patterns">
+      <h2 class="section-title"><span class="num">8</span> Concurrency Patterns</h2>
+
+      <h3>Worker Pool — giới hạn concurrency</h3>
+      <div class="dg">
+        <div class="dg-row scroll">
+          <div class="node green">producer</div>
+          <div class="arrow-h grn" style="width:36px"></div>
+          <div class="dg-group">
+            <span class="grp-label">jobs channel (buffered)</span>
+            <div class="cells"><span class="cell fill">J</span><span class="cell fill">J</span><span class="cell fill">J</span><span class="cell empty">…</span></div>
+          </div>
+          <div class="arrow-h" style="width:36px"></div>
+          <div class="dg-col">
+            <div class="node accent sm">worker1</div>
+            <div class="node accent sm">worker2</div>
+            <div class="node accent sm">worker3</div>
+            <div class="node accent sm">workerN</div>
+          </div>
+          <div class="arrow-h" style="width:36px"></div>
+          <div class="dg-group">
+            <span class="grp-label">results channel</span>
+            <div class="cells"><span class="cell fill">R</span><span class="cell fill">R</span><span class="cell empty">…</span></div>
+          </div>
+          <div class="arrow-h grn" style="width:36px"></div>
+          <div class="node green">consumer</div>
+        </div>
+        <div class="dg-note">N worker cố định → bounded concurrency · buffered jobs → backpressure · <code>close(jobs)</code> → worker thoát <code>range</code> → <code>wg.Wait()</code> → <code>close(results)</code></div>
+      </div>
+      <div class="block why">
+        <div class="block-label">Tại sao cần worker pool thay vì "một goroutine mỗi job"</div>
+        <p>Tạo goroutine rẻ nhưng không miễn phí: mỗi job spawn 1 goroutine có thể tạo hàng triệu goroutine đồng thời → cạn RAM, quá tải downstream (DB, API). Worker pool <strong>giới hạn số việc chạy song song</strong>, bảo vệ tài nguyên và tạo backpressure.</p>
+      </div>
+
+      <h3>Fan-out / Fan-in</h3>
+      <div class="dg">
+        <div class="dg-row scroll">
+          <div class="node green">source</div>
+          <div class="arrow-h" style="width:40px"></div>
+          <div class="dg-col">
+            <div class="node accent sm">worker1</div>
+            <div class="node accent sm">worker2</div>
+            <div class="node accent sm">worker3</div>
+          </div>
+          <div class="arrow-h grn" style="width:40px"></div>
+          <div class="node purple">merge</div>
+          <div class="arrow-h grn" style="width:40px"></div>
+          <div class="node green">output</div>
+        </div>
+        <div class="dg-legend">
+          <span class="lg"><span class="sw accent"></span> Fan-out: 1 nguồn chia cho N worker</span>
+          <span class="lg"><span class="sw"></span> Fan-in: mỗi worker 1 goroutine copy vào out; WaitGroup xong hết → close(out)</span>
+        </div>
+      </div>
+
+      <h3>Pipeline</h3>
+      <div class="dg">
+        <div class="dg-row scroll">
+          <div class="node accent">gen<span class="sub">stage 1</span></div>
+          <div class="arrow-h" style="width:44px"></div><span class="arrow-lbl">chan</span><div class="arrow-h" style="width:44px"></div>
+          <div class="node accent">square<span class="sub">stage 2</span></div>
+          <div class="arrow-h" style="width:44px"></div><span class="arrow-lbl">chan</span><div class="arrow-h" style="width:44px"></div>
+          <div class="node accent">filter<span class="sub">stage 3</span></div>
+          <div class="arrow-h grn" style="width:44px"></div>
+          <div class="node green">output</div>
+        </div>
+        <div class="dg-note">Mỗi stage: <code>for v := range in { out &lt;- process(v) }; close(out)</code>. Hủy toàn pipeline bằng context/done truyền qua mọi stage.</div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Nguyên tắc pipeline an toàn</div>
+        <ul>
+          <li>Mỗi stage đóng channel output của mình khi xong (<code>defer close(out)</code>).</li>
+          <li>Truyền <code>ctx</code> hoặc <code>done</code> để hủy sớm, tránh goroutine kẹt khi downstream dừng đọc.</li>
+          <li>Dùng <code>select</code> với <code>&lt;-ctx.Done()</code> ở mọi thao tác gửi để không leak.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 9. PROBLEMS -->
+    <section id="problems">
+      <h2 class="section-title"><span class="num">9</span> Data Race / Deadlock / Goroutine Leak</h2>
+
+      <h3>Data Race</h3>
+      <div class="block how">
+        <div class="block-label">Định nghĩa &amp; phát hiện</div>
+        <p>Data race = 2+ goroutine truy cập cùng biến, ít nhất một ghi, không có đồng bộ. Kết quả <strong>không xác định</strong> (undefined behavior). Phát hiện: <code>go test -race</code> / <code>go run -race</code> — dùng ThreadSanitizer, overhead 2–10× nhưng cực hữu ích. Race detector chỉ báo race <em>quan sát được lúc chạy</em>, không chứng minh không có race.</p>
+      </div>
+
+      <h3>Deadlock — 4 điều kiện Coffman</h3>
+      <div class="dg">
+        <div class="dg-title">Deadlock cổ điển — hai goroutine khóa ngược thứ tự</div>
+        <div class="dg-row dg-gap-lg top">
+          <div class="dg-group" style="border-color:var(--danger)">
+            <span class="grp-label" style="color:var(--danger)">Goroutine A</span>
+            <div class="node green sm">Lock(mu1)<span class="sub">giữ mu1</span></div>
+            <div class="arrow-v red"></div>
+            <div class="node red sm">Lock(mu2)<span class="sub">chờ B nhả</span></div>
+          </div>
+          <div class="node muted">vòng chờ<br>tròn</div>
+          <div class="dg-group" style="border-color:var(--danger)">
+            <span class="grp-label" style="color:var(--danger)">Goroutine B</span>
+            <div class="node green sm">Lock(mu2)<span class="sub">giữ mu2</span></div>
+            <div class="arrow-v red"></div>
+            <div class="node red sm">Lock(mu1)<span class="sub">chờ A nhả</span></div>
+          </div>
+        </div>
+        <div class="dg-note"><strong>4 điều kiện Coffman</strong> (phá 1 là hết): Mutual exclusion · Hold and wait · No preemption · <strong style="color:var(--accent-2)">Circular wait</strong> (thường phá cái này bằng khóa theo thứ tự).</div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Phòng deadlock</div>
+        <ul>
+          <li><strong>Khóa theo thứ tự nhất quán</strong> (vd luôn lock theo ID tăng dần) → phá circular wait.</li>
+          <li>Giữ critical section ngắn; tránh gọi hàm ngoài khi đang giữ lock.</li>
+          <li>Go tự phát hiện deadlock toàn cục đơn giản: <code>fatal error: all goroutines are asleep - deadlock!</code> (chỉ khi MỌI goroutine block).</li>
+        </ul>
+      </div>
+
+      <h3>Goroutine Leak</h3>
+      <div class="dg">
+        <div class="dg-title">Ba nguồn goroutine leak phổ biến</div>
+        <div class="dg-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+          <div class="dg-group" style="border-color:var(--danger)">
+            <span class="grp-label" style="color:var(--danger)">1 · gửi không ai nhận</span>
+            <div class="dg-row"><div class="node red sm">goroutine</div><div class="arrow-h red" style="width:30px"></div><div class="node muted sm">ch (no recv)</div></div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)"><code>ch&lt;-1</code> kẹt mãi</span>
+          </div>
+          <div class="dg-group" style="border-color:var(--danger)">
+            <span class="grp-label" style="color:var(--danger)">2 · nhận không ai gửi</span>
+            <div class="dg-row"><div class="node muted sm">ch (no send)</div><div class="arrow-h red" style="width:30px"></div><div class="node red sm">goroutine</div></div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)"><code>&lt;-ch</code> kẹt mãi</span>
+          </div>
+          <div class="dg-group" style="border-color:var(--danger)">
+            <span class="grp-label" style="color:var(--danger)">3 · loop không lối thoát</span>
+            <div class="node red sm">for { work() }</div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)">thiếu <code>ctx.Done()</code> → chạy mãi</span>
+          </div>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Phòng &amp; phát hiện leak</div>
+        <ul>
+          <li>Luôn có <strong>lối thoát</strong>: <code>context</code> hoặc <code>done</code> channel.</li>
+          <li>Dùng buffered channel khi sender có thể không có receiver.</li>
+          <li>Đặt timeout cho mọi thao tác blocking.</li>
+          <li>Giám sát <code>runtime.NumGoroutine()</code> trong production; test với <code>go.uber.org/goleak</code>.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 10. MUTEX VS CHANNEL -->
+    <section id="mutexvschan">
+      <h2 class="section-title"><span class="num">10</span> Mutex vs Channel — chọn cái nào?</h2>
+      <div class="grid-2">
+        <div class="col">
+          <h4>Dùng Mutex khi</h4>
+          <ul style="margin-left:18px">
+            <li>Bảo vệ shared state (cache, map, counter).</li>
+            <li>Lock/unlock đơn giản, critical section ngắn.</li>
+            <li>Hiệu năng quan trọng (mutex nhanh hơn channel).</li>
+            <li>State không "chảy" giữa goroutine.</li>
+          </ul>
+        </div>
+        <div class="col">
+          <h4>Dùng Channel khi</h4>
+          <ul style="margin-left:18px">
+            <li>Truyền dữ liệu / chuyển quyền sở hữu.</li>
+            <li>Báo hiệu (done, cancel, signal).</li>
+            <li>Pipeline, fan-out, worker pool.</li>
+            <li>Điều phối nhiều goroutine.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Nguyên tắc thực dụng</div>
+        <p>Go proverb: <em>"Don't communicate by sharing memory; share memory by communicating."</em> Nhưng đừng giáo điều — dùng cái nào khiến code <strong>rõ ràng hơn</strong> cho tình huống cụ thể. Counter đơn giản → atomic/mutex. Điều phối luồng công việc → channel. Nhiều senior chọn sai vì cố nhét channel vào chỗ mutex phù hợp hơn.</p>
+      </div>
+    </section>
+
+    <!-- FLASHCARDS -->
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <p>Che đáp án, tự trả lời thành tiếng rồi click đối chiếu.</p>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Giải thích GMP và vai trò của P.</span><span class="icon">+</span></div>
+        <div class="a"><p>G=goroutine (unit of work), M=OS thread, P=logical processor (=GOMAXPROCS). M phải gắn P mới chạy được G. P giữ local run queue + mcache. P giúp: giảm tranh chấp lock (LRQ riêng), cấp phát nhanh (mcache không lock), và cho phép M khác tiếp quản khi M bị block syscall.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Điều gì xảy ra khi goroutine gọi blocking syscall?</span><span class="icon">+</span></div>
+        <div class="a"><p>M kẹt cùng G trong syscall. P tách khỏi M, tìm/tạo M khác để tiếp tục chạy các G còn lại trong LRQ. Khi syscall xong, M0 cố lấy lại một P; nếu không có, G0 vào queue và M0 ngủ. Nhờ vậy CPU không lãng phí.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Network I/O có block M không? Tại sao?</span><span class="icon">+</span></div>
+        <div class="a"><p>Không. Runtime dùng netpoller (epoll/kqueue/IOCP). Goroutine chờ I/O bị park, M được giải phóng. Khi socket sẵn sàng, netpoller đánh thức goroutine, đưa lại run queue. Đây là lý do Go xử lý hàng trăm nghìn kết nối với ít thread.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Work stealing trộm bao nhiêu và tại sao?</span><span class="icon">+</span></div>
+        <div class="a"><p>Trộm NỬA LRQ của P ngẫu nhiên khác. Không lấy 1 (phải trộm liên tục, tốn đồng bộ) cũng không lấy tất cả (bị trộm lại thành rỗng). Nửa là điểm cân bằng tối ưu.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Unbuffered channel hoạt động thế nào khi send?</span><span class="icon">+</span></div>
+        <div class="a"><p>Rendezvous: nếu có receiver đang chờ, copy trực tiếp từ stack sender sang stack receiver, đánh thức cả hai. Nếu không, sender bị park vào sendq chờ receiver. Là điểm đồng bộ tạo happens-before.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Send/recv/close trên nil và closed channel?</span><span class="icon">+</span></div>
+        <div class="a"><p>Nil: send & recv block mãi; close panic. Closed: send panic; recv trả zero value + ok=false; close lần nữa panic. Recv-on-closed không panic để consumer đọc hết buffer (nền tảng for range).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Select chọn case thế nào khi nhiều case sẵn sàng?</span><span class="icon">+</span></div>
+        <div class="a"><p>Chọn ngẫu nhiên (pseudo-random) để đảm bảo fairness. Có default → không block. nil channel trong case → case đó bị bỏ qua, dùng để bật/tắt case động.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Mutex có reentrant không? Starvation mode là gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Không reentrant (lock 2 lần cùng goroutine → deadlock). Starvation mode: nếu waiter chờ &gt;1ms, mutex chuyển từ normal (cho goroutine mới cướp lock, throughput cao) sang trao lock trực tiếp FIFO cho waiter → công bằng, tránh đói.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Atomic vs Mutex — khi nào dùng?</span><span class="icon">+</span></div>
+        <div class="a"><p>Atomic cho một word (counter/flag/pointer), lock-free, nhanh, không deadlock. Mutex cho nhiều biến/logic phức tạp (read-modify-write nhiều field). Đừng lạm dụng atomic cho logic cần mutex.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Kể các quan hệ happens-before trong Go memory model.</span><span class="icon">+</span></div>
+        <div class="a"><p>send hb recv; close hb recv-zero; Unlock hb Lock kế tiếp; once.Do xong hb các Do sau; ghi trước go hb goroutine mới. Không có hb = không đảm bảo thấy giá trị = phải đồng bộ.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Ba nguyên nhân goroutine leak và cách phòng?</span><span class="icon">+</span></div>
+        <div class="a"><p>1) Gửi channel không ai nhận. 2) Nhận channel không ai gửi. 3) Loop không lối thoát. Phòng: context/done channel, buffered channel, timeout, giám sát NumGoroutine, test goleak.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao worker pool tốt hơn "goroutine mỗi job"?</span><span class="icon">+</span></div>
+        <div class="a"><p>Goroutine mỗi job có thể spawn hàng triệu goroutine → cạn RAM, quá tải downstream. Worker pool giới hạn concurrency, bảo vệ tài nguyên, tạo backpressure qua buffered channel.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Preemption trước và sau Go 1.14?</span><span class="icon">+</span></div>
+        <div class="a"><p>Trước 1.14: cooperative, chỉ nhường tại function call → tight loop treo GC. Từ 1.14: asynchronous, runtime gửi SIGURG preempt cả tight loop → giải quyết latency GC.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="week1.html"><span class="dir">← Trước</span><span class="title">Week 1 · Go Core</span></a>
+      <a href="week3.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 3 · Runtime</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

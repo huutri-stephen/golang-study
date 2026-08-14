@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 4 – Backend Engineering (Deep Dive) | Senior Go Interview</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Golang knowledge</div></a>
+      <div class="sub">Deep Dive</div>
+    </div>
+    <h2>Week 4 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#http">1. HTTP Protocol</a>
+      <a href="#client">2. HTTP Client &amp; Pool</a>
+      <a href="#server">3. HTTP Server</a>
+      <a href="#middleware">4. Middleware</a>
+      <a href="#shutdown">5. Graceful Shutdown</a>
+      <a href="#context">6. Context</a>
+      <a href="#api">7. API Design</a>
+      <a href="#idempotency">8. Idempotency</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html">Week 1 · Go Core</a>
+      <a href="week2.html">Week 2 · Concurrency</a>
+      <a href="week3.html">Week 3 · Runtime</a>
+      <a href="week4.html" class="active">Week 4 · Backend</a>
+      <a href="week5.html">Week 5 · DB/Redis/MQ</a>
+      <a href="week6.html">Week 6 · Distributed</a>
+      <a href="week7.html">Week 7 · System Design</a>
+      <a href="week8.html">Week 8 · Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 4 · Deep Dive</span>
+      <h1>Backend Engineering</h1>
+      <p>Xây dịch vụ HTTP production-grade với Go: connection pooling, timeout, middleware, graceful shutdown, context propagation, và thiết kế API chịu lỗi.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★★</b><span>Priority</span></div>
+        <div class="item"><b>8</b><span>Chủ đề sâu</span></div>
+        <div class="item"><b>~12h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <p>Viết được HTTP handler thì dễ; viết dịch vụ <strong>không sập dưới tải, không leak connection, shutdown sạch, và trả lỗi đúng chuẩn</strong> mới là senior. Trọng tâm tuần này là những chi tiết production thường bị bỏ qua.</p>
+      <div class="tldr">
+        <div class="label">TL;DR</div>
+        <ul>
+          <li>HTTP/2 giải quyết head-of-line blocking của HTTP/1.1 bằng multiplexing streams.</li>
+          <li><code>http.Transport</code> tự pool connection — nhưng <strong>phải <code>resp.Body.Close()</code></strong> nếu không leak.</li>
+          <li>Set đầy đủ timeout: dial, TLS, response header, idle, và tổng.</li>
+          <li>Server: <code>ReadTimeout</code>, <code>WriteTimeout</code>, <code>IdleTimeout</code> để chống slowloris và stuck handler.</li>
+          <li>Middleware = <code>func(http.Handler) http.Handler</code>, chain theo thứ tự.</li>
+          <li>Graceful shutdown: ngừng nhận mới → drain in-flight → cleanup.</li>
+          <li>Context: tham số đầu, không lưu trong struct, always defer cancel.</li>
+          <li>Idempotency key để chống double-charge khi client retry.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 1. HTTP -->
+    <section id="http">
+      <h2 class="section-title"><span class="num">1</span> HTTP Protocol</h2>
+      <table>
+        <tr><th></th><th>HTTP/1.1</th><th>HTTP/2</th><th>HTTP/3</th></tr>
+        <tr><td>Transport</td><td>TCP</td><td>TCP</td><td>QUIC (UDP)</td></tr>
+        <tr><td>Multiplexing</td><td>Không (HOL blocking)</td><td>Có (streams)</td><td>Có</td></tr>
+        <tr><td>Header</td><td>text, không nén</td><td>HPACK nén</td><td>QPACK nén</td></tr>
+        <tr><td>Setup RTT</td><td>TCP+TLS (~2-3)</td><td>TCP+TLS (~2)</td><td>0-1 RTT</td></tr>
+      </table>
+      <div class="block how">
+        <div class="block-label">Head-of-line blocking</div>
+        <p>Trên HTTP/1.1, mỗi TCP connection xử lý request tuần tự — request B phải chờ response A xong (dù A chậm). Trình duyệt mở nhiều connection để lách. HTTP/2 <strong>multiplexing</strong> nhiều "stream" trên một connection → không chờ nhau ở tầng HTTP. Nhưng vẫn còn HOL ở tầng TCP (mất 1 packet chặn cả connection) → HTTP/3 dùng QUIC/UDP để giải quyết triệt để.</p>
+      </div>
+      <div class="dg">
+        <div class="dg-row" style="justify-content:space-between;max-width:420px;margin:0 auto 6px">
+          <div class="node accent">Client</div>
+          <div class="node accent">Server</div>
+        </div>
+        <div class="dg-wrap" style="gap:6px;max-width:460px;margin:0 auto">
+          <div class="dg-group" style="width:100%;padding:10px">
+            <span class="grp-label">TCP 3-way (~1.5 RTT)</span>
+            <div style="width:100%"><span class="arrow-lbl">SYN →</span><div class="arrow-h" style="width:100%"></div></div>
+            <div style="width:100%"><div class="arrow-h rev" style="width:100%"></div><span class="arrow-lbl">← SYN+ACK</span></div>
+            <div style="width:100%"><span class="arrow-lbl">ACK →</span><div class="arrow-h" style="width:100%"></div></div>
+          </div>
+          <div class="dg-group" style="width:100%;padding:10px;border-color:var(--accent-3)">
+            <span class="grp-label" style="color:var(--accent-3)">TLS handshake (~1-2 RTT)</span>
+            <div style="width:100%"><span class="arrow-lbl">ClientHello →</span><div class="arrow-h" style="width:100%"></div></div>
+            <div style="width:100%"><div class="arrow-h rev" style="width:100%"></div><span class="arrow-lbl">← ServerHello, Cert</span></div>
+            <div style="width:100%"><span class="arrow-lbl">Finished →</span><div class="arrow-h" style="width:100%"></div></div>
+          </div>
+          <div class="dg-group" style="width:100%;padding:10px;border-color:var(--accent-2)">
+            <span class="grp-label" style="color:var(--accent-2)">Data (keep-alive tái dùng)</span>
+            <div style="width:100%"><span class="arrow-lbl">HTTP Request →</span><div class="arrow-h grn" style="width:100%"></div></div>
+            <div style="width:100%"><div class="arrow-h grn rev" style="width:100%"></div><span class="arrow-lbl">← HTTP Response</span></div>
+          </div>
+        </div>
+        <div class="dg-note">Connection được giữ lại cho request kế tiếp → không lặp lại TCP + TLS handshake.</div>
+      </div>
+      <div class="block purpose">
+        <div class="block-label">Keep-Alive vì sao quan trọng</div>
+        <p>Mỗi connection mới tốn TCP handshake + TLS (~vài ms–chục ms). Keep-Alive tái dùng connection cho nhiều request → tiết kiệm hầu hết chi phí thiết lập. Go client/server bật keep-alive mặc định. Đây là nền tảng của connection pooling.</p>
+      </div>
+    </section>
+
+    <!-- 2. CLIENT -->
+    <section id="client">
+      <h2 class="section-title"><span class="num">2</span> HTTP Client &amp; Connection Pool</h2>
+      <div class="block pitfall">
+        <div class="block-label">Đừng dùng http.Get / DefaultClient trong production</div>
+        <p><code>http.Get</code> và <code>http.DefaultClient</code> <strong>không có timeout</strong> → một downstream chậm có thể treo goroutine vô hạn, dồn ứ → cạn tài nguyên. Luôn tạo client với timeout rõ ràng.</p>
+      </div>
+      <pre><code>client := &amp;http.<span class="tok-type">Client</span>{
+    Timeout: <span class="tok-num">30</span> * time.Second,        <span class="tok-com">// tổng deadline</span>
+    Transport: &amp;http.<span class="tok-type">Transport</span>{
+        DialContext: (&amp;net.<span class="tok-type">Dialer</span>{
+            Timeout:   <span class="tok-num">5</span> * time.Second,   <span class="tok-com">// timeout kết nối TCP</span>
+            KeepAlive: <span class="tok-num">30</span> * time.Second,
+        }).DialContext,
+        TLSHandshakeTimeout:   <span class="tok-num">5</span> * time.Second,
+        ResponseHeaderTimeout: <span class="tok-num">10</span> * time.Second,
+        MaxIdleConns:          <span class="tok-num">100</span>,   <span class="tok-com">// tổng idle</span>
+        MaxIdleConnsPerHost:   <span class="tok-num">10</span>,    <span class="tok-com">// idle mỗi host</span>
+        MaxConnsPerHost:       <span class="tok-num">50</span>,    <span class="tok-com">// tối đa mỗi host</span>
+        IdleConnTimeout:       <span class="tok-num">90</span> * time.Second,
+    },
+}</code></pre>
+
+      <h3>Vòng đời connection trong pool</h3>
+      <div class="dg">
+        <div class="dg-group" style="border-style:solid">
+          <span class="grp-label">Connection Pool (http.Transport)</span>
+          <div class="dg-row">
+            <span class="grp-label">idle conns</span>
+            <div class="cells"><span class="cell fill">c1</span><span class="cell fill">c2</span><span class="cell fill">c3</span></div>
+          </div>
+        </div>
+        <div class="dg-row dg-gap-lg top" style="margin-top:16px">
+          <div class="dg-col">
+            <div class="node green">request đến</div>
+            <div class="arrow-v"></div>
+            <div class="node accent" style="max-width:220px">có idle?</div>
+            <div class="dg-row dg-gap-lg" style="margin-top:6px">
+              <div class="dg-col"><span class="arrow-lbl" style="color:var(--accent-2)">có</span><div class="node green sm">dùng lại c1</div></div>
+              <div class="dg-col"><span class="arrow-lbl">không</span><div class="node accent sm">tạo mới<span class="sub">nếu &lt; MaxConnsPerHost</span></div></div>
+            </div>
+          </div>
+          <div class="dg-col">
+            <div class="node green">done</div>
+            <div class="arrow-v grn"></div>
+            <div class="node green sm">resp.Body.Close()<span class="sub">→ trả về pool (idle)</span></div>
+            <div class="arrow-v red"></div>
+            <div class="node red sm">KHÔNG Close → LEAK</div>
+          </div>
+        </div>
+        <div class="dg-note">idle quá <code>IdleConnTimeout</code> → đóng, giải phóng.</div>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Bug #1: quên đóng response body</div>
+        <pre><code>resp, err := client.<span class="tok-fn">Do</span>(req)
+<span class="tok-kw">if</span> err != <span class="tok-kw">nil</span> { <span class="tok-kw">return</span> err }
+<span class="tok-kw">defer</span> resp.Body.<span class="tok-fn">Close</span>()  <span class="tok-com">// BẮT BUỘC — nếu không connection không về pool</span>
+io.<span class="tok-fn">Copy</span>(io.Discard, resp.Body) <span class="tok-com">// đọc hết body để tái dùng được connection</span></code></pre>
+        <p>Không close → connection kẹt → pool cạn → request mới timeout. Triệu chứng: latency tăng dần, nhiều TCP ở TIME_WAIT, "connection refused".</p>
+      </div>
+      <div class="block how">
+        <div class="block-label">Phân cấp timeout</div>
+        <div class="dg">
+          <div class="node accent wide" style="min-width:100%">Client.Timeout — tổng deadline bao trùm tất cả</div>
+          <div class="arrow-v"></div>
+          <div class="dg-row scroll" style="gap:6px">
+            <div class="node sm">Dial<span class="sub">Dialer.Timeout</span></div>
+            <div class="arrow-h" style="width:20px"></div>
+            <div class="node sm">TLS<span class="sub">TLSHandshakeTimeout</span></div>
+            <div class="arrow-h" style="width:20px"></div>
+            <div class="node sm">gửi request</div>
+            <div class="arrow-h" style="width:20px"></div>
+            <div class="node sm">chờ header<span class="sub">ResponseHeaderTimeout</span></div>
+            <div class="arrow-h" style="width:20px"></div>
+            <div class="node sm">đọc body</div>
+          </div>
+        </div>
+        <p>Chỉ set <code>Client.Timeout</code> là đủ để không treo, nhưng set granular giúp biết lỗi ở giai đoạn nào khi debug.</p>
+      </div>
+    </section>
+
+    <!-- 3. SERVER -->
+    <section id="server">
+      <h2 class="section-title"><span class="num">3</span> HTTP Server</h2>
+      <pre><code>srv := &amp;http.<span class="tok-type">Server</span>{
+    Addr:           <span class="tok-str">":8080"</span>,
+    Handler:        mux,
+    ReadTimeout:    <span class="tok-num">5</span> * time.Second,   <span class="tok-com">// chống slowloris</span>
+    WriteTimeout:   <span class="tok-num">10</span> * time.Second,  <span class="tok-com">// chống handler treo</span>
+    IdleTimeout:    <span class="tok-num">120</span> * time.Second, <span class="tok-com">// đóng keep-alive idle</span>
+    MaxHeaderBytes: <span class="tok-num">1</span> &lt;&lt; <span class="tok-num">20</span>,          <span class="tok-com">// giới hạn header 1MB</span>
+}</code></pre>
+      <div class="block why">
+        <div class="block-label">Vì sao mỗi timeout tồn tại</div>
+        <ul>
+          <li><strong>ReadTimeout:</strong> chống <em>slowloris attack</em> — kẻ tấn công gửi request cực chậm để giữ connection, làm cạn thread/goroutine.</li>
+          <li><strong>WriteTimeout:</strong> chống handler ghi response quá lâu (client chậm hoặc handler kẹt).</li>
+          <li><strong>IdleTimeout:</strong> đóng keep-alive connection không dùng, giải phóng tài nguyên.</li>
+        </ul>
+      </div>
+      <div class="block how">
+        <div class="block-label">Cơ chế: goroutine mỗi connection</div>
+        <p>Go server spawn <strong>một goroutine cho mỗi connection</strong> (accept loop). Nhờ goroutine rẻ, model này scale tốt tới hàng chục nghìn connection. Nhưng handler chậm/leak sẽ tích lũy goroutine → đây là lý do cần timeout và giám sát <code>NumGoroutine</code>.</p>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Bảo mật</div>
+        <p>Endpoint mạng nên có auth/rate-limit. Server không giới hạn body size dễ bị tấn công memory — dùng <code>http.MaxBytesReader</code>. Không log dữ liệu nhạy cảm (token, mật khẩu).</p>
+      </div>
+    </section>
+
+    <!-- 4. MIDDLEWARE -->
+    <section id="middleware">
+      <h2 class="section-title"><span class="num">4</span> Middleware Pattern</h2>
+      <pre><code><span class="tok-kw">type</span> <span class="tok-type">Middleware</span> <span class="tok-kw">func</span>(http.<span class="tok-type">Handler</span>) http.<span class="tok-type">Handler</span>
+
+<span class="tok-kw">func</span> <span class="tok-fn">Logging</span>(next http.<span class="tok-type">Handler</span>) http.<span class="tok-type">Handler</span> {
+    <span class="tok-kw">return</span> http.<span class="tok-fn">HandlerFunc</span>(<span class="tok-kw">func</span>(w http.<span class="tok-type">ResponseWriter</span>, r *http.<span class="tok-type">Request</span>) {
+        start := time.<span class="tok-fn">Now</span>()
+        next.<span class="tok-fn">ServeHTTP</span>(w, r)          <span class="tok-com">// gọi handler tiếp theo</span>
+        log.<span class="tok-fn">Printf</span>(<span class="tok-str">"%s %v"</span>, r.URL.Path, time.<span class="tok-fn">Since</span>(start))
+    })
+}</code></pre>
+      <div class="dg">
+        <div class="dg-title"><code>Recovery(Logging(Auth(handler)))</code> — thứ tự bọc quyết định thứ tự chạy</div>
+        <div class="dg-row scroll">
+          <div class="node green">Request</div>
+          <div class="arrow-h acc" style="width:24px"></div>
+          <div class="node accent sm">Recovery</div>
+          <div class="arrow-h acc" style="width:24px"></div>
+          <div class="node accent sm">Logging</div>
+          <div class="arrow-h acc" style="width:24px"></div>
+          <div class="node accent sm">Auth</div>
+          <div class="arrow-h acc" style="width:24px"></div>
+          <div class="node purple">Handler<span class="sub">xử lý, ghi response</span></div>
+        </div>
+        <div class="dg-row scroll" style="margin-top:8px">
+          <div class="node green">Response</div>
+          <div class="arrow-h grn rev" style="width:24px"></div>
+          <div class="node accent sm">Recovery</div>
+          <div class="arrow-h grn rev" style="width:24px"></div>
+          <div class="node accent sm">Logging</div>
+          <div class="arrow-h grn rev" style="width:24px"></div>
+          <div class="node accent sm">Auth</div>
+          <div class="arrow-h grn rev" style="width:24px"></div>
+          <div class="node purple">Handler</div>
+        </div>
+        <div class="dg-note">Middleware ngoài cùng (Recovery) chạy ĐẦU TIÊN lúc vào và CUỐI CÙNG lúc ra → thích hợp bắt panic toàn bộ.</div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Thứ tự middleware hợp lý</div>
+        <p>Ngoài → trong: <strong>RequestID → Recovery → Logging → CORS → RateLimit → Auth → Handler</strong>. Recovery đặt ngoài để bắt panic của mọi tầng trong. RequestID đặt ngoài cùng để mọi log đều có trace ID. Auth đặt sát handler để chỉ chạy sau khi qua các lớp bảo vệ chung.</p>
+      </div>
+      <div class="block how">
+        <div class="block-label">Wrap ResponseWriter để bắt status code</div>
+        <p>Handler gọi <code>WriteHeader(200)</code> nhưng middleware không "thấy" status để log. Giải pháp: bọc <code>http.ResponseWriter</code> trong struct riêng, override <code>WriteHeader</code>/<code>Write</code> để lưu status và size, rồi log sau khi handler xong.</p>
+      </div>
+    </section>
+
+    <!-- 5. SHUTDOWN -->
+    <section id="shutdown">
+      <h2 class="section-title"><span class="num">5</span> Graceful Shutdown</h2>
+      <div class="dg">
+        <div class="dg-row scroll">
+          <div class="node orange">SIGTERM</div>
+          <div class="arrow-h" style="width:30px"></div>
+          <div class="dg-wrap">
+            <div class="node accent wide" style="text-align:left">1 · Health check trả 503<span class="sub">báo LB ngừng gửi</span></div>
+            <div class="arrow-v"></div>
+            <div class="node accent wide" style="text-align:left">2 · srv.Shutdown(ctx)<span class="sub">ngừng nhận mới, KHÔNG cắt request đang chạy</span></div>
+            <div class="arrow-v"></div>
+            <div class="node accent wide" style="text-align:left">3 · Chờ in-flight hoàn tất<span class="sub">có timeout</span></div>
+            <div class="arrow-v"></div>
+            <div class="node accent wide" style="text-align:left">4 · Cleanup<span class="sub">đóng DB pool, flush metrics/logs</span></div>
+            <div class="arrow-v"></div>
+            <div class="node green wide">5 · Exit</div>
+          </div>
+        </div>
+        <div class="dg-note">K8s: SIGTERM → preStop hook → chờ <code>terminationGracePeriodSeconds</code> → SIGKILL nếu chưa xong. <strong>Đặt shutdown timeout &lt; grace period (mặc định 30s).</strong></div>
+      </div>
+      <pre><code>quit := <span class="tok-fn">make</span>(<span class="tok-kw">chan</span> os.<span class="tok-type">Signal</span>, <span class="tok-num">1</span>)
+signal.<span class="tok-fn">Notify</span>(quit, syscall.SIGINT, syscall.SIGTERM)
+&lt;-quit
+ctx, cancel := context.<span class="tok-fn">WithTimeout</span>(context.<span class="tok-fn">Background</span>(), <span class="tok-num">30</span>*time.Second)
+<span class="tok-kw">defer</span> cancel()
+srv.<span class="tok-fn">Shutdown</span>(ctx)  <span class="tok-com">// graceful: drain rồi đóng</span></code></pre>
+      <div class="block pitfall">
+        <div class="block-label">Shutdown vs Close</div>
+        <p><code>srv.Shutdown(ctx)</code>: graceful — chờ request đang chạy xong (tới khi ctx hết hạn). <code>srv.Close()</code>: đóng ngay, cắt mọi connection đang xử lý → mất request. Production luôn dùng Shutdown.</p>
+      </div>
+    </section>
+
+    <!-- 6. CONTEXT -->
+    <section id="context">
+      <h2 class="section-title"><span class="num">6</span> Context</h2>
+      <div class="block purpose">
+        <div class="block-label">Ba mục đích của context</div>
+        <ul>
+          <li><strong>Cancellation:</strong> lan truyền tín hiệu hủy xuống toàn cây gọi.</li>
+          <li><strong>Deadline/Timeout:</strong> tự động hủy sau thời hạn.</li>
+          <li><strong>Request-scoped values:</strong> trace ID, user ID (KHÔNG phải tham số hàm).</li>
+        </ul>
+      </div>
+      <div class="dg">
+        <div class="dg-title">Cây context — hủy cha thì hủy toàn bộ con</div>
+        <div class="dg-wrap">
+          <div class="node muted">Background()</div>
+          <div class="arrow-v"></div>
+          <div class="node accent">WithCancel (cancel)</div>
+          <div class="arrow-v"></div>
+          <div class="dg-row">
+            <div class="node accent sm">WithTimeout (5s)</div>
+            <div class="node purple sm">WithValue (traceID)</div>
+            <div class="node accent sm">con khác</div>
+          </div>
+          <div class="arrow-v"></div>
+          <div class="dg-row scroll">
+            <div class="node green sm">handler()</div>
+            <div class="arrow-h" style="width:24px"></div>
+            <div class="node green sm">callDB(ctx)</div>
+            <div class="arrow-h" style="width:24px"></div>
+            <div class="node green sm">callCache(ctx)</div>
+          </div>
+        </div>
+        <div class="dg-note"><code>ctx.Done()</code> đóng khi: hết 5s / gọi cancel() / cha bị hủy → mọi tầng đang chờ <code>&lt;-ctx.Done()</code> được đánh thức để dừng.</div>
+      </div>
+      <div class="block why">
+        <div class="block-label">Tại sao KHÔNG lưu context trong struct</div>
+        <p>Context có vòng đời <strong>một request</strong> (ngắn). Struct thường sống lâu hơn (cả vòng đời app). Lưu context vào struct tạo lệch vòng đời: tín hiệu hủy lỗi thời, rò rỉ, propagation sai. Luôn truyền context làm <strong>tham số đầu tiên</strong>: <code>func Do(ctx context.Context, ...)</code>.</p>
+      </div>
+      <div class="block best">
+        <div class="block-label">Best practices</div>
+        <ul>
+          <li>Tham số đầu tiên; không truyền <code>nil</code> (dùng <code>context.Background()</code>/<code>TODO()</code>).</li>
+          <li>Luôn <code>defer cancel()</code> để tránh leak context.</li>
+          <li>Key dùng type <strong>unexported</strong> để tránh va chạm: <code>type ctxKey string</code>.</li>
+          <li>Values chỉ cho dữ liệu request-scoped (trace ID), KHÔNG cho DB/logger/config.</li>
+          <li>Kiểm tra <code>&lt;-ctx.Done()</code> trong vòng lặp dài và mọi thao tác blocking.</li>
+          <li>Propagate xuống downstream: <code>db.QueryContext(ctx,...)</code>, <code>req.WithContext(ctx)</code>.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 7. API DESIGN -->
+    <section id="api">
+      <h2 class="section-title"><span class="num">7</span> API Design</h2>
+      <h3>Status codes (mức senior)</h3>
+      <table>
+        <tr><th>Code</th><th>Ý nghĩa</th><th>Khi dùng</th></tr>
+        <tr><td>200/201/204</td><td>OK / Created / No Content</td><td>GET-PUT / POST tạo / DELETE</td></tr>
+        <tr><td>202</td><td>Accepted</td><td>Xử lý async (queue), trả status URL</td></tr>
+        <tr><td>400 vs 422</td><td>Bad Request vs Unprocessable</td><td>Sai cú pháp vs đúng cú pháp nhưng sai nghĩa</td></tr>
+        <tr><td>401 vs 403</td><td>Unauthorized vs Forbidden</td><td>"Bạn là ai?" vs "Biết rồi, không cho phép"</td></tr>
+        <tr><td>409</td><td>Conflict</td><td>Xung đột trạng thái (trùng lặp)</td></tr>
+        <tr><td>429</td><td>Too Many Requests</td><td>Rate limited (kèm Retry-After)</td></tr>
+        <tr><td>502/503/504</td><td>Bad Gateway/Unavailable/Timeout</td><td>Lỗi upstream / quá tải / upstream timeout</td></tr>
+      </table>
+
+      <h3>Pagination: Offset vs Cursor</h3>
+      <div class="grid-2">
+        <div class="col">
+          <h4>Offset (<code>?page=2&amp;size=20</code>)</h4>
+          <ul style="margin-left:18px">
+            <li>Đơn giản, nhảy trang bất kỳ.</li>
+            <li>Chậm với offset lớn (DB phải quét bỏ).</li>
+            <li>Không nhất quán khi insert/delete (skip/duplicate).</li>
+          </ul>
+        </div>
+        <div class="col">
+          <h4>Cursor (<code>?cursor=xxx&amp;limit=20</code>)</h4>
+          <ul style="margin-left:18px">
+            <li>Hiệu năng ổn định O(1) (dùng index).</li>
+            <li>Nhất quán khi dữ liệu thay đổi.</li>
+            <li>Không nhảy trang tùy ý; phức tạp hơn.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Chuẩn error response</div>
+        <pre><code>{
+  <span class="tok-str">"error"</span>: {
+    <span class="tok-str">"code"</span>: <span class="tok-str">"VALIDATION_ERROR"</span>,
+    <span class="tok-str">"message"</span>: <span class="tok-str">"Invalid parameters"</span>,
+    <span class="tok-str">"details"</span>: [{<span class="tok-str">"field"</span>:<span class="tok-str">"email"</span>,<span class="tok-str">"message"</span>:<span class="tok-str">"invalid format"</span>}],
+    <span class="tok-str">"request_id"</span>: <span class="tok-str">"req-abc123"</span>
+  }
+}</code></pre>
+        <p>Luôn kèm <code>code</code> ổn định (client switch theo code, không theo message) và <code>request_id</code> để trace.</p>
+      </div>
+    </section>
+
+    <!-- 8. IDEMPOTENCY -->
+    <section id="idempotency">
+      <h2 class="section-title"><span class="num">8</span> Idempotency</h2>
+      <div class="dg">
+        <div class="dg-title">Vấn đề: client timeout rồi retry → xử lý 2 lần (double charge)</div>
+        <div class="dg-wrap" style="gap:6px">
+          <div class="dg-row scroll"><div class="node green">Client</div><div class="arrow-h" style="width:40px"></div><span class="arrow-lbl">POST /payment</span><div class="arrow-h" style="width:40px"></div><div class="node accent">Server xử lý OK</div></div>
+          <div class="dg-row scroll"><div class="node green">Client</div><div class="arrow-h red rev" style="width:40px"></div><span class="arrow-lbl" style="color:var(--danger)">response MẤT (mạng lỗi)</span></div>
+          <div class="dg-row scroll"><div class="node green">Client</div><div class="arrow-h red" style="width:40px"></div><span class="arrow-lbl" style="color:var(--danger)">retry</span><div class="arrow-h red" style="width:40px"></div><div class="node red">xử lý LẦN 2 → charge 2 lần!</div></div>
+        </div>
+      </div>
+      <div class="dg">
+        <div class="dg-title">Giải pháp: Idempotency-Key</div>
+        <div class="dg-row scroll">
+          <div class="node green">Client<span class="sub">Idempotency-Key: k-123</span></div>
+          <div class="arrow-h acc" style="width:40px"></div>
+          <div class="node accent" style="max-width:260px">Key k-123 đã có trong store?</div>
+        </div>
+        <div class="dg-row dg-gap-lg top" style="margin-top:12px">
+          <div class="dg-col"><span class="arrow-lbl" style="color:var(--accent-2)">completed</span><div class="node green sm">trả CACHED response<span class="sub">không xử lý lại</span></div></div>
+          <div class="dg-col"><span class="arrow-lbl" style="color:var(--accent-3)">processing</span><div class="node orange sm">trả 409<span class="sub">đang xử lý</span></div></div>
+          <div class="dg-col"><span class="arrow-lbl">chưa có</span><div class="node accent sm">lock → xử lý → lưu response</div></div>
+          <div class="dg-col"><span class="arrow-lbl" style="color:var(--danger)">lỗi</span><div class="node red sm">xóa key<span class="sub">cho retry sạch</span></div></div>
+        </div>
+      </div>
+      <table>
+        <tr><th>Method</th><th>Idempotent tự nhiên?</th></tr>
+        <tr><td>GET, PUT (absolute), DELETE</td><td>Có → retry an toàn</td></tr>
+        <tr><td>POST, PATCH (relative)</td><td>Không → cần idempotency key</td></tr>
+      </table>
+      <div class="block best">
+        <div class="block-label">Chi tiết triển khai</div>
+        <ul>
+          <li>Client sinh key duy nhất (UUID) mỗi ý định thao tác.</li>
+          <li>Store: Redis (nhanh) với TTL 24-48h, hoặc DB (bền hơn).</li>
+          <li>Dùng distributed lock trên key để chặn xử lý đồng thời cùng key.</li>
+          <li>Lưu cả status code + body để replay chính xác response cũ.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- FLASHCARDS -->
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>HTTP/1.1 head-of-line blocking là gì? HTTP/2 giải quyết ra sao?</span><span class="icon">+</span></div>
+        <div class="a"><p>Trên 1 TCP connection HTTP/1.1, request xử lý tuần tự — B chờ A xong dù A chậm. HTTP/2 multiplexing nhiều stream trên 1 connection → không chờ nhau ở tầng HTTP. Vẫn còn HOL ở tầng TCP → HTTP/3 dùng QUIC/UDP.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao phải đóng response body?</span><span class="icon">+</span></div>
+        <div class="a"><p>Không đóng → connection không trả về pool → leak. Pool cạn dần → request mới timeout, nhiều TCP TIME_WAIT. Luôn <code>defer resp.Body.Close()</code> và đọc hết body (io.Copy vào io.Discard) để tái dùng connection.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao không dùng http.DefaultClient trong production?</span><span class="icon">+</span></div>
+        <div class="a"><p>Không có timeout → downstream chậm treo goroutine vô hạn, dồn ứ, cạn tài nguyên. Luôn tạo client với Timeout + Transport cấu hình pool và các timeout con.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Các server timeout và mục đích?</span><span class="icon">+</span></div>
+        <div class="a"><p>ReadTimeout: chống slowloris (gửi request cực chậm giữ connection). WriteTimeout: chống handler ghi response quá lâu. IdleTimeout: đóng keep-alive idle. MaxHeaderBytes: giới hạn header.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Thứ tự middleware hợp lý và vì sao Recovery đặt ngoài?</span><span class="icon">+</span></div>
+        <div class="a"><p>RequestID → Recovery → Logging → CORS → RateLimit → Auth → Handler. Recovery ngoài để bắt panic của mọi tầng trong. RequestID ngoài cùng để mọi log có trace ID. Middleware ngoài chạy đầu tiên lúc vào, cuối cùng lúc ra.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Graceful shutdown flow trong Kubernetes?</span><span class="icon">+</span></div>
+        <div class="a"><p>SIGTERM → health check trả 503 → srv.Shutdown(ctx) ngừng nhận mới, drain in-flight → cleanup (DB, metrics) → exit. Đặt shutdown timeout &lt; terminationGracePeriodSeconds (mặc định 30s) để tránh SIGKILL.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao không lưu context trong struct?</span><span class="icon">+</span></div>
+        <div class="a"><p>Context có vòng đời một request (ngắn); struct sống lâu hơn → lệch vòng đời, tín hiệu hủy lỗi thời, rò rỉ, propagation sai. Luôn truyền làm tham số đầu tiên.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>401 vs 403?</span><span class="icon">+</span></div>
+        <div class="a"><p>401 Unauthorized: chưa biết bạn là ai (thiếu/sai token). 403 Forbidden: biết rồi nhưng không đủ quyền. "Who are you?" vs "I know you, but no."</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Offset vs cursor pagination?</span><span class="icon">+</span></div>
+        <div class="a"><p>Offset: đơn giản, nhảy trang bất kỳ, nhưng chậm với offset lớn và không nhất quán khi insert/delete. Cursor: O(1) ổn định (dùng index), nhất quán, nhưng không nhảy trang tùy ý. User-facing feed → cursor.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Idempotency key chống double charge thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Client gửi key duy nhất. Server: key completed → trả cached response; processing → 409; chưa có → lock, xử lý, lưu response. Lỗi → xóa key cho retry. Store Redis/DB với TTL 24-48h + distributed lock.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Triệu chứng và fix connection pool exhaustion?</span><span class="icon">+</span></div>
+        <div class="a"><p>Triệu chứng: latency tăng dần, TCP TIME_WAIT nhiều, connection refused/timeout. Fix: đóng response body (nguyên nhân #1), tăng MaxConnsPerHost, set IdleConnTimeout, sửa downstream chậm (giữ connection lâu).</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="week3.html"><span class="dir">← Trước</span><span class="title">Week 3 · Runtime</span></a>
+      <a href="week5.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 5 · DB/Redis/MQ</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

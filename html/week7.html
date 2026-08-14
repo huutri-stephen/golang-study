@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 7 – System Design (Deep Dive) | Senior Go Interview</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Go Interview</div></a>
+      <div class="sub">Senior Backend Prep · Deep Dive</div>
+    </div>
+    <h2>Week 7 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#framework">1. Answer Framework</a>
+      <a href="#estimation">2. Scale Estimation</a>
+      <a href="#urlshortener">3. URL Shortener</a>
+      <a href="#ratelimiter">4. Rate Limiter</a>
+      <a href="#notification">5. Notification System</a>
+      <a href="#chat">6. Chat System</a>
+      <a href="#payment">7. Payment System</a>
+      <a href="#building">8. Building Blocks</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html">Week 1 · Go Core</a>
+      <a href="week2.html">Week 2 · Concurrency</a>
+      <a href="week3.html">Week 3 · Runtime</a>
+      <a href="week4.html">Week 4 · Backend</a>
+      <a href="week5.html">Week 5 · DB/Redis/MQ</a>
+      <a href="week6.html">Week 6 · Distributed</a>
+      <a href="week7.html" class="active">Week 7 · System Design</a>
+      <a href="week8.html">Week 8 · Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 7 · Deep Dive</span>
+      <h1>System Design</h1>
+      <p>Khung trả lời có cấu trúc, ước lượng quy mô, và các thiết kế kinh điển. Interviewer đánh giá cách bạn <em>reason về trade-off</em>, không phải đáp án đúng duy nhất.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★★</b><span>Priority</span></div>
+        <div class="item"><b>7</b><span>Designs</span></div>
+        <div class="item"><b>~20h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <p>System design interview không có đáp án duy nhất. Điểm số đến từ: làm rõ yêu cầu, ước lượng hợp lý, kiến trúc mạch lạc, và <strong>giải thích trade-off ở mỗi quyết định</strong> ("dùng X vì..., đánh đổi là...").</p>
+      <div class="tldr">
+        <div class="label">TL;DR — quy trình 8 bước</div>
+        <ul>
+          <li><strong>Requirements</strong> (functional + non-functional) → đừng nhảy vào schema ngay.</li>
+          <li><strong>Scale estimation</strong>: DAU, QPS, storage, bandwidth.</li>
+          <li><strong>API design</strong> → <strong>Data model</strong> → <strong>High-level architecture</strong>.</li>
+          <li><strong>Deep dive</strong> vào component quan trọng nhất.</li>
+          <li><strong>Scaling + failure handling + observability</strong>.</li>
+          <li>Luôn nêu trade-off: SQL vs NoSQL, sync vs async, cache ở đâu.</li>
+          <li>Con số nhớ: 1 ngày ≈ 86400s ≈ 100K s; 1M user ≈ 10 QPS.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 1. FRAMEWORK -->
+    <section id="framework">
+      <h2 class="section-title"><span class="num">1</span> Answer Framework</h2>
+      <div class="dg">
+        <div class="dg-title">Đi từ rộng đến sâu — đừng nhảy thẳng vào database</div>
+        <div class="dg-wrap">
+          <div class="node accent wide" style="text-align:left">1 · Requirements<span class="sub">functional (làm gì) + non-functional (scale, latency, availability)</span></div>
+          <div class="arrow-v"></div>
+          <div class="node accent wide" style="text-align:left">2 · Scale Estimation<span class="sub">DAU, QPS, storage, bandwidth</span></div>
+          <div class="arrow-v"></div>
+          <div class="node accent wide" style="text-align:left">3 · API Design<span class="sub">REST/gRPC endpoints</span></div>
+          <div class="arrow-v"></div>
+          <div class="node accent wide" style="text-align:left">4 · Data Model<span class="sub">entities, SQL vs NoSQL</span></div>
+          <div class="arrow-v"></div>
+          <div class="node purple wide" style="text-align:left">5 · High-level Architecture<span class="sub">components, data flow</span></div>
+          <div class="arrow-v"></div>
+          <div class="node purple wide" style="text-align:left">6 · Deep Dive<span class="sub">component quan trọng nhất + trade-offs</span></div>
+          <div class="arrow-v"></div>
+          <div class="node green wide" style="text-align:left">7 · Scaling &amp; Failure<span class="sub">replication, cache, degradation</span></div>
+          <div class="arrow-v"></div>
+          <div class="node green wide" style="text-align:left">8 · Observability<span class="sub">metrics, logs, tracing, alerts</span></div>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">7 câu hỏi trade-off phải tự trả lời cho mỗi design</div>
+        <ul>
+          <li>Tại sao chọn cách này? Có phương án nào khác?</li>
+          <li>Trade-off là gì? Chuyện gì xảy ra khi component X chết?</li>
+          <li>Scale ra sao ở 10×? Monitor thế nào? Debug production ra sao?</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 2. ESTIMATION -->
+    <section id="estimation">
+      <h2 class="section-title"><span class="num">2</span> Scale Estimation</h2>
+      <div class="kv-grid">
+        <div class="kv"><div class="k">1 ngày</div><div class="v">~100K giây</div></div>
+        <div class="kv"><div class="k">1M user (1 req/ngày)</div><div class="v">~10 QPS</div></div>
+        <div class="kv"><div class="k">Peak</div><div class="v">3–5× trung bình</div></div>
+        <div class="kv"><div class="k">1 server</div><div class="v">~1K–10K QPS</div></div>
+      </div>
+      <table>
+        <tr><th>Quy mô</th><th>QPS trung bình (mỗi user 1 req/ngày)</th></tr>
+        <tr><td>1 triệu user</td><td>~10 QPS</td></tr>
+        <tr><td>10 triệu user</td><td>~100 QPS</td></tr>
+        <tr><td>100 triệu user</td><td>~1,000 QPS</td></tr>
+      </table>
+      <div class="block how">
+        <div class="block-label">Cách trình bày</div>
+        <p>Nói to giả định: "Giả sử 10M DAU, mỗi user 10 request/ngày → 100M request/ngày ÷ 100K giây ≈ 1000 QPS trung bình, peak ~5000 QPS." Rồi tính storage: "mỗi record 1KB × 100M/ngày = 100GB/ngày, ~36TB/năm." Con số dẫn dắt quyết định kiến trúc (cần shard? cần cache?).</p>
+      </div>
+    </section>
+
+    <!-- 3. URL SHORTENER -->
+    <section id="urlshortener">
+      <h2 class="section-title"><span class="num">3</span> Design: URL Shortener</h2>
+      <div class="dg">
+        <div class="dg-title">Kiến trúc — read-heavy (10:1), cache đóng vai trò then chốt</div>
+        <div class="dg-row scroll top">
+          <div class="node green">Client</div>
+          <div class="arrow-h" style="width:24px"></div>
+          <div class="node accent">API / LB</div>
+          <div class="arrow-h" style="width:24px"></div>
+          <div class="dg-col">
+            <div class="node purple sm">ID Generator<span class="sub">counter/snowflake → Base62</span></div>
+            <div class="node orange sm">Redis Cache<span class="sub">hot URLs, 90%+ hit</span></div>
+            <div class="node accent sm">DB (short → long)</div>
+          </div>
+        </div>
+        <div class="dg-note">Write: sinh ID → Base62 (7 ký tự = 62⁷ ≈ 3.5 nghìn tỷ) → lưu DB. Read: cache hit → redirect (301/302); miss → DB → cache.</div>
+      </div>
+      <div class="grid-2">
+        <div class="col">
+          <h4>Quyết định chính</h4>
+          <ul style="margin-left:18px">
+            <li>ID: counter+Base62 (tuần tự) hoặc snowflake (phân tán).</li>
+            <li>Hash: MD5 lấy 7 ký tự → check collision → retry.</li>
+            <li>DB: SQL đơn giản hoặc KV store cho scale.</li>
+          </ul>
+        </div>
+        <div class="col">
+          <h4>301 vs 302</h4>
+          <ul style="margin-left:18px">
+            <li>301 permanent: browser cache, không hit server lại → nhanh, mất analytics.</li>
+            <li>302 temporary: luôn hit server → theo dõi click được.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. RATE LIMITER -->
+    <section id="ratelimiter">
+      <h2 class="section-title"><span class="num">4</span> Design: Rate Limiter</h2>
+      <div class="dg">
+        <div class="dg-row scroll top">
+          <div class="node green">Request</div>
+          <div class="arrow-h" style="width:24px"></div>
+          <div class="node accent">Rate Limiter Middleware</div>
+          <div class="arrow-h" style="width:24px"></div>
+          <div class="node purple">Redis<span class="sub">counter theo user/IP/key</span></div>
+        </div>
+        <div class="dg-row dg-gap-lg" style="margin-top:12px">
+          <div class="dg-col"><span class="arrow-lbl" style="color:var(--accent-2)">trong hạn mức</span><div class="node green sm">forward → service</div></div>
+          <div class="dg-col"><span class="arrow-lbl" style="color:var(--danger)">vượt hạn mức</span><div class="node red sm">429 + Retry-After</div></div>
+        </div>
+        <div class="dg-note">Distributed: dùng Redis Lua script (atomic check+increment) để tránh race giữa nhiều instance. Giới hạn theo user ID / IP / API key.</div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Chọn thuật toán</div>
+        <p>Token bucket cho API cho phép burst; sliding window log cho enforce chặt (tốn bộ nhớ); sliding window counter là cân bằng phổ biến. Trả header <code>X-RateLimit-Remaining</code>, <code>Retry-After</code> để client tự điều tiết.</p>
+      </div>
+    </section>
+
+    <!-- 5. NOTIFICATION -->
+    <section id="notification">
+      <h2 class="section-title"><span class="num">5</span> Design: Notification System</h2>
+      <div class="dg">
+        <div class="dg-title">Tách API khỏi delivery bằng queue → chịu tải, retry được</div>
+        <div class="dg-row scroll top">
+          <div class="node green">API</div>
+          <div class="arrow-h" style="width:20px"></div>
+          <div class="node accent">Priority Queue<span class="sub">urgent vs regular</span></div>
+          <div class="arrow-h" style="width:20px"></div>
+          <div class="node purple">Router<span class="sub">theo preference</span></div>
+          <div class="arrow-h" style="width:20px"></div>
+          <div class="dg-col">
+            <div class="node accent sm">Push (FCM/APNS)</div>
+            <div class="node accent sm">Email (SES)</div>
+            <div class="node accent sm">SMS (Twilio)</div>
+          </div>
+        </div>
+        <div class="dg-row" style="margin-top:10px"><div class="node red sm">thất bại → retry → DLQ</div><div class="node orange sm">dedup</div><div class="node muted sm">user preferences (opt-in/out)</div></div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Điểm cần nêu</div>
+        <p>Rate limit theo user/channel (tránh spam), template engine (nội dung cá nhân hóa), deduplication (tránh gửi trùng), retry + DLQ cho delivery lỗi, priority queue (OTP khẩn cấp vs marketing).</p>
+      </div>
+    </section>
+
+    <!-- 6. CHAT -->
+    <section id="chat">
+      <h2 class="section-title"><span class="num">6</span> Design: Chat System (Go-relevant)</h2>
+      <div class="dg">
+        <div class="dg-title">WebSocket gateway + Redis Pub/Sub cho multi-instance</div>
+        <div class="dg-row scroll top">
+          <div class="dg-col">
+            <div class="node green sm">Client A</div>
+            <div class="node green sm">Client B</div>
+          </div>
+          <div class="arrow-h acc" style="width:24px"></div>
+          <div class="dg-col">
+            <div class="node accent sm">Gateway 1 (WS)</div>
+            <div class="node accent sm">Gateway 2 (WS)</div>
+          </div>
+          <div class="arrow-h" style="width:24px"></div>
+          <div class="node purple">Redis Pub/Sub<span class="sub">cross-instance</span></div>
+          <div class="arrow-h" style="width:24px"></div>
+          <div class="node accent">Message Store<span class="sub">Cassandra</span></div>
+        </div>
+        <div class="dg-note">User trên Gateway 1 gửi tin cho user trên Gateway 2 → publish vào Redis channel → Gateway 2 subscribe → đẩy tới client. Ordering: sequence number per conversation.</div>
+      </div>
+      <div class="grid-2">
+        <div class="col">
+          <h4>Vì sao WebSocket</h4>
+          <ul style="margin-left:18px">
+            <li>Kết nối 2 chiều, giữ liên tục.</li>
+            <li>Mỗi connection = 1 goroutine (Go nhẹ).</li>
+            <li>Buffered channel per connection (write queue).</li>
+          </ul>
+        </div>
+        <div class="col">
+          <h4>Thách thức</h4>
+          <ul style="margin-left:18px">
+            <li>Multi-device fan-out.</li>
+            <li>Offline messages: store &amp; forward khi reconnect.</li>
+            <li>Backpressure: buffer đầy → drop/disconnect.</li>
+            <li>Hot room (triệu user) → shard.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 7. PAYMENT -->
+    <section id="payment">
+      <h2 class="section-title"><span class="num">7</span> Design: Payment System (10K TPS)</h2>
+      <div class="dg">
+        <div class="dg-row scroll top">
+          <div class="node green">Client</div>
+          <div class="arrow-h" style="width:20px"></div>
+          <div class="node accent">API Gateway<span class="sub">rate limit, auth</span></div>
+          <div class="arrow-h" style="width:20px"></div>
+          <div class="node purple">Payment Service<span class="sub">idempotency check</span></div>
+          <div class="arrow-h" style="width:20px"></div>
+          <div class="node accent">PSP Adapter<span class="sub">Stripe/Bank</span></div>
+        </div>
+        <div class="dg-row scroll" style="margin-top:10px">
+          <div class="node orange sm">Idempotency Store (Redis)</div>
+          <div class="node accent sm">Ledger (double-entry)</div>
+          <div class="node accent sm">Outbox → events</div>
+          <div class="node muted sm">Reconciliation job (daily)</div>
+        </div>
+        <div class="dg-note">State machine: CREATED → PROCESSING → SUCCEEDED/FAILED. Mọi write có idempotency key. Reconciliation đối chiếu record nội bộ với PSP hàng ngày.</div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Điểm then chốt cho payment</div>
+        <ul>
+          <li><strong>Exactly-once nghiệp vụ:</strong> idempotency key trên mọi thao tác ghi.</li>
+          <li><strong>Double-entry bookkeeping:</strong> mỗi giao dịch có debit + credit → audit được.</li>
+          <li><strong>Outbox</strong> để publish event tin cậy.</li>
+          <li><strong>Reconciliation</strong>: đối chiếu với PSP, xử lý mismatch (PSP thành công nhưng local fail → mark succeeded; ngược lại → refund).</li>
+          <li><strong>Distributed lock</strong> per payment để chặn xử lý song song cùng payment.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 8. BUILDING BLOCKS -->
+    <section id="building">
+      <h2 class="section-title"><span class="num">8</span> Building Blocks &amp; Trade-offs</h2>
+      <div class="dg">
+        <div class="dg-title">Các tầng cache — càng gần user càng nhanh, càng ít kiểm soát</div>
+        <div class="dg-row scroll">
+          <div class="node green sm">Browser cache</div>
+          <div class="arrow-h" style="width:20px"></div>
+          <div class="node accent sm">CDN</div>
+          <div class="arrow-h" style="width:20px"></div>
+          <div class="node accent sm">API Gateway cache</div>
+          <div class="arrow-h" style="width:20px"></div>
+          <div class="node purple sm">App / Redis</div>
+          <div class="arrow-h" style="width:20px"></div>
+          <div class="node orange sm">Database</div>
+        </div>
+      </div>
+      <table>
+        <tr><th>Quyết định</th><th>Chọn A</th><th>Chọn B</th></tr>
+        <tr><td>SQL vs NoSQL</td><td>SQL: quan hệ, ACID (users, orders, payments)</td><td>NoSQL: scale ngang, schema mềm (messages, logs)</td></tr>
+        <tr><td>Sync vs Async</td><td>Sync: cần response ngay (API gateway → service)</td><td>Async: background, resilient (event, queue)</td></tr>
+        <tr><td>Sharding key</td><td>user_id (phân bố đều)</td><td>tránh country (lệch, hot shard)</td></tr>
+        <tr><td>LB layer</td><td>L4 (TCP): nhanh</td><td>L7 (HTTP): routing theo path, health check</td></tr>
+      </table>
+      <div class="block how">
+        <div class="block-label">Database sharding — lưu ý</div>
+        <p>Shard key quyết định phân bố (user_id tốt, country lệch). Cross-shard query đắt (tránh hoặc dùng materialized view). Resharding đau đớn → dùng <strong>virtual shard</strong> (nhiều virtual shard map vào ít physical node, di chuyển virtual shard khi cần). Join across shard không làm được → denormalize hoặc join tầng ứng dụng.</p>
+      </div>
+    </section>
+
+    <!-- FLASHCARDS -->
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>5 phút đầu của system design interview làm gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Làm rõ functional requirements (hệ thống làm gì), non-functional (scale, latency, availability), constraints (read/write ratio, data size), nêu và xác nhận giả định. KHÔNG nhảy vào schema/tech stack ngay.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Ước lượng nhanh: 10M DAU → QPS?</span><span class="icon">+</span></div>
+        <div class="a"><p>10M user × 10 req/ngày = 100M req/ngày ÷ 100K giây ≈ 1000 QPS trung bình, peak ~5× = 5000 QPS. Storage: 1KB × 100M = 100GB/ngày ≈ 36TB/năm.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>URL shortener: sinh short ID thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Counter/snowflake ID → Base62 encode (7 ký tự = 62⁷ ≈ 3.5 nghìn tỷ). Hoặc hash (MD5) lấy 7 ký tự → check collision → retry. Cache hot URLs ở Redis (90%+ hit vì read-heavy).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>301 vs 302 cho URL shortener?</span><span class="icon">+</span></div>
+        <div class="a"><p>301 permanent: browser cache, không hit server lại → nhanh nhưng mất analytics. 302 temporary: luôn hit server → theo dõi click. Chọn theo nhu cầu analytics.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Chat multi-server: user A (server 1) gửi user B (server 2)?</span><span class="icon">+</span></div>
+        <div class="a"><p>Gateway 1 publish message vào Redis Pub/Sub channel của user B → Gateway 2 (đang subscribe) nhận → đẩy tới client B qua WebSocket. Hoặc consistent hashing (user luôn nối cùng server).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Chat: đảm bảo thứ tự tin nhắn?</span><span class="icon">+</span></div>
+        <div class="a"><p>Sequence number per conversation (server sinh monotonic seq mỗi room). Client sort theo seq. Gap detection: seq nhảy → request tin nhắn thiếu.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Payment: chống double charge?</span><span class="icon">+</span></div>
+        <div class="a"><p>Idempotency key trên mọi write; state machine (CREATED→PROCESSING chỉ 1 lần); distributed lock per payment; check store trước khi xử lý (completed → trả cached). Double-entry ledger để audit.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Payment reconciliation là gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Job hàng ngày đối chiếu record nội bộ với PSP. Mismatch: PSP thành công nhưng local fail → mark succeeded; local succeeded nhưng PSP fail → refund; thiếu một bên → alert điều tra.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>SQL vs NoSQL — chọn thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>SQL: quan hệ phức tạp, ACID, transaction (users, orders, payments). NoSQL: scale ngang, write nhiều, schema mềm (messages, logs, analytics). Chọn theo access pattern và yêu cầu nhất quán, không theo trend.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Flash sale: chống oversell?</span><span class="icon">+</span></div>
+        <div class="a"><p>Pre-warm stock vào Redis; atomic DECR (nếu &lt;0 → sold out, return ngay); chỉ tạo order cho user lấy được stock; TTL trên reservation (không thanh toán trong 10 phút → release). Queue để làm mượt spike.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Database sharding — lưu ý gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Shard key phân bố đều (user_id tốt, country lệch → hot shard). Cross-shard query đắt → tránh/materialized view. Resharding đau → virtual shard. Join across shard không làm được → denormalize hoặc join tầng app.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Cache đặt ở đâu?</span><span class="icon">+</span></div>
+        <div class="a"><p>Browser → CDN → API Gateway → App/Redis → DB. Càng gần user càng nhanh, càng ít kiểm soát. CDN cho static + public API; Redis cho shared state, session, hot data; local cache cho hot key cực nóng.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Notification system: các điểm cần nêu?</span><span class="icon">+</span></div>
+        <div class="a"><p>Priority queue (urgent vs regular), rate limit per user/channel, template engine, deduplication, retry + DLQ, user preferences (opt-in/out per channel), tách API khỏi delivery bằng queue để chịu tải.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="week6.html"><span class="dir">← Trước</span><span class="title">Week 6 · Distributed</span></a>
+      <a href="week8.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 8 · Mock</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 6 – Distributed Systems (Deep Dive) | Senior Go Interview</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Go Interview</div></a>
+      <div class="sub">Senior Backend Prep · Deep Dive</div>
+    </div>
+    <h2>Week 6 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#cap">1. CAP Theorem</a>
+      <a href="#consistency">2. Consistency Models</a>
+      <a href="#2pc">3. 2PC vs Saga</a>
+      <a href="#outbox">4. Outbox &amp; CDC</a>
+      <a href="#idempotency">5. Idempotency</a>
+      <a href="#retry">6. Retry &amp; Backoff</a>
+      <a href="#circuit">7. Circuit Breaker</a>
+      <a href="#ratelimit">8. Rate Limiting</a>
+      <a href="#patterns">9. Reliability Patterns</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html">Week 1 · Go Core</a>
+      <a href="week2.html">Week 2 · Concurrency</a>
+      <a href="week3.html">Week 3 · Runtime</a>
+      <a href="week4.html">Week 4 · Backend</a>
+      <a href="week5.html">Week 5 · DB/Redis/MQ</a>
+      <a href="week6.html" class="active">Week 6 · Distributed</a>
+      <a href="week7.html">Week 7 · System Design</a>
+      <a href="week8.html">Week 8 · Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 6 · Deep Dive</span>
+      <h1>Distributed Systems</h1>
+      <p>Khi hệ thống trải trên nhiều node và mạng: CAP, mô hình nhất quán, giao dịch phân tán (Saga, Outbox), idempotency, và các reliability pattern để chịu lỗi.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★★</b><span>Priority</span></div>
+        <div class="item"><b>9</b><span>Chủ đề sâu</span></div>
+        <div class="item"><b>~14h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <p>Distributed systems là nơi câu hỏi interview chuyển từ "code thế nào" sang "reason về trade-off ra sao khi mạng lỗi". Nguyên lý xuyên suốt: <strong>mạng sẽ lỗi, node sẽ chết, message sẽ trùng/mất</strong> — thiết kế phải chấp nhận điều đó.</p>
+      <div class="tldr">
+        <div class="label">TL;DR</div>
+        <ul>
+          <li><strong>CAP:</strong> khi network partition (P bắt buộc), chọn C (từ chối request) hoặc A (trả data cũ).</li>
+          <li>Nhất quán: strong → eventual; read-after-write, causal là các mức trung gian.</li>
+          <li><strong>2PC</strong> blocking, không partition-tolerant; <strong>Saga</strong> = chuỗi local txn + compensation.</li>
+          <li><strong>Outbox</strong> giải bài toán "ghi DB + publish event nguyên tử".</li>
+          <li><strong>Idempotency key</strong> chống double-processing khi retry.</li>
+          <li>Retry phải kèm <strong>exponential backoff + jitter</strong>; chỉ retry lỗi transient.</li>
+          <li><strong>Circuit breaker:</strong> Closed → Open → Half-Open, chặn cascading failure.</li>
+          <li>Rate limit: token bucket (cho phép burst) vs sliding window (chặt).</li>
+          <li>Compensation phải idempotent; distributed lock cần fencing token.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 1. CAP -->
+    <section id="cap">
+      <h2 class="section-title"><span class="num">1</span> CAP Theorem</h2>
+      <div class="dg">
+        <div class="dg-title">Khi network partition xảy ra (P), chỉ giữ được C HOẶC A</div>
+        <div class="dg-row dg-gap-lg top">
+          <div class="dg-group" style="border-color:var(--accent)">
+            <span class="grp-label" style="color:var(--accent)">CP — ưu tiên nhất quán</span>
+            <div class="node accent">từ chối / chờ<span class="sub">không trả data có thể sai</span></div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)">banking, inventory, ZooKeeper, etcd</span>
+          </div>
+          <div class="node red">Network<br>Partition</div>
+          <div class="dg-group" style="border-color:var(--accent-2)">
+            <span class="grp-label" style="color:var(--accent-2)">AP — ưu tiên khả dụng</span>
+            <div class="node green">vẫn trả lời<span class="sub">chấp nhận data cũ (stale)</span></div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)">social feed, DNS, Cassandra, Dynamo</span>
+          </div>
+        </div>
+        <div class="dg-note"><strong>P là bắt buộc</strong> trong hệ phân tán (mạng luôn có thể lỗi) → thực chất là chọn CP hay AP. "CA" chỉ tồn tại trên hệ một node.</div>
+      </div>
+      <table>
+        <tr><th>Hệ thống</th><th>Lựa chọn</th><th>Đánh đổi khi partition</th></tr>
+        <tr><td>PostgreSQL (single)</td><td>CA</td><td>Không partition-tolerant</td></tr>
+        <tr><td>MongoDB, etcd, ZooKeeper</td><td>CP</td><td>Không khả dụng khi mất quorum</td></tr>
+        <tr><td>Cassandra, DynamoDB</td><td>AP</td><td>Eventually consistent, có thể đọc stale</td></tr>
+      </table>
+      <div class="block pitfall">
+        <div class="block-label">Hiểu đúng CAP</div>
+        <p>CAP chỉ nói về hành vi <strong>khi có partition</strong>. Lúc mạng bình thường, hệ thống có thể vừa consistent vừa available. Ngoài ra còn PACELC: <em>nếu Partition thì chọn A/C, Else (bình thường) chọn Latency/Consistency</em> — bổ sung góc nhìn latency.</p>
+      </div>
+    </section>
+
+    <!-- 2. CONSISTENCY -->
+    <section id="consistency">
+      <h2 class="section-title"><span class="num">2</span> Consistency Models</h2>
+      <div class="dg">
+        <div class="dg-title">Phổ nhất quán: mạnh (đắt) → yếu (rẻ, nhanh)</div>
+        <div class="dg-row scroll">
+          <div class="node accent">Strong<span class="sub">luôn đọc bản mới nhất</span></div>
+          <div class="arrow-h" style="width:30px"></div>
+          <div class="node accent">Read-after-write<span class="sub">thấy được ghi của chính mình</span></div>
+          <div class="arrow-h" style="width:30px"></div>
+          <div class="node accent">Causal<span class="sub">giữ quan hệ nhân-quả</span></div>
+          <div class="arrow-h" style="width:30px"></div>
+          <div class="node green">Eventual<span class="sub">hội tụ sau cùng</span></div>
+        </div>
+        <div class="dg-legend">
+          <span class="lg">← Nhất quán mạnh: cần consensus, chậm, ít khả dụng</span>
+          <span class="lg">Nhất quán yếu: nhanh, khả dụng cao →</span>
+        </div>
+      </div>
+      <table>
+        <tr><th>Model</th><th>Đảm bảo</th><th>Dùng khi</th></tr>
+        <tr><td>Strong</td><td>Mọi read thấy write mới nhất</td><td>Banking, inventory count</td></tr>
+        <tr><td>Read-after-write</td><td>User thấy ghi của chính họ</td><td>Đăng bài, đổi profile</td></tr>
+        <tr><td>Causal</td><td>Nếu A gây B, mọi observer thấy A trước B</td><td>Comment thread, chat</td></tr>
+        <tr><td>Eventual</td><td>Replica hội tụ sau cùng</td><td>Feed, analytics, đếm view</td></tr>
+      </table>
+      <div class="block best">
+        <div class="block-label">Chọn mức nhất quán</div>
+        <p>Đừng mặc định strong consistency ở mọi nơi — nó tốn kém (consensus, latency, giảm khả dụng). Xác định từng luồng dữ liệu: tiền/tồn kho cần strong; feed/analytics chấp nhận eventual. Read-after-write thường đạt bằng đọc từ leader sau khi ghi, hoặc session affinity.</p>
+      </div>
+    </section>
+
+    <!-- 3. 2PC vs SAGA -->
+    <section id="2pc">
+      <h2 class="section-title"><span class="num">3</span> Distributed Transactions: 2PC vs Saga</h2>
+
+      <h3>Two-Phase Commit (2PC)</h3>
+      <div class="dg">
+        <div class="dg-row scroll top">
+          <div class="node accent">Coordinator</div>
+          <div class="dg-col">
+            <div class="dg-row"><span class="arrow-lbl">Phase 1: Prepare →</span><div class="arrow-h" style="width:40px"></div><div class="node green sm">Participant A: vote yes</div></div>
+            <div class="dg-row"><span class="arrow-lbl">Phase 1: Prepare →</span><div class="arrow-h" style="width:40px"></div><div class="node green sm">Participant B: vote yes</div></div>
+            <div class="dg-row"><span class="arrow-lbl" style="color:var(--accent-2)">Phase 2: Commit →</span><div class="arrow-h grn" style="width:40px"></div><div class="node green sm">A, B commit + ack</div></div>
+          </div>
+        </div>
+        <div class="dg-note"><strong>Điểm yếu:</strong> nếu coordinator chết sau Prepare → participant khóa tài nguyên chờ mãi (blocking). Đồng bộ, không partition-tolerant.</div>
+      </div>
+
+      <h3>Saga Pattern</h3>
+      <div class="dg">
+        <div class="dg-title">Chuỗi local transaction, mỗi bước có compensation nếu lỗi</div>
+        <div class="dg-row scroll">
+          <div class="node green sm">Create Order</div>
+          <div class="arrow-h grn" style="width:24px"></div>
+          <div class="node green sm">Charge Payment</div>
+          <div class="arrow-h grn" style="width:24px"></div>
+          <div class="node red sm">Reserve Stock<span class="sub">LỖI</span></div>
+        </div>
+        <div class="dg-row scroll" style="margin-top:10px">
+          <div class="node orange sm">Cancel Order</div>
+          <div class="arrow-h red rev" style="width:24px"></div>
+          <div class="node orange sm">Refund Payment</div>
+          <div class="arrow-h red rev" style="width:24px"></div>
+          <div class="node red sm">Stock fail → bắt đầu compensation</div>
+        </div>
+        <div class="dg-note">Lỗi ở bước 3 → chạy compensation NGƯỢC chiều: Refund → Cancel. Compensation phải <strong>idempotent</strong>.</div>
+      </div>
+      <div class="grid-2">
+        <div class="col">
+          <h4>Choreography (event-driven)</h4>
+          <ul style="margin-left:18px">
+            <li>Service phát/nghe event, tự phản ứng.</li>
+            <li>Loose coupling, không single point of failure.</li>
+            <li>Khó trace luồng, dependency ngầm.</li>
+          </ul>
+        </div>
+        <div class="col">
+          <h4>Orchestration (coordinator)</h4>
+          <ul style="margin-left:18px">
+            <li>Một orchestrator điều phối các bước.</li>
+            <li>Dễ hiểu, xử lý lỗi tập trung.</li>
+            <li>Orchestrator là single point of failure.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Chọn 2PC hay Saga</div>
+        <p>2PC: strong consistency, dùng khi cùng một DB nhiều bảng, hoặc hệ thống nhỏ chấp nhận blocking. Saga: eventual consistency, dùng cho microservices có DB riêng. Luồng &gt;3 bước → orchestration; luồng đơn giản → choreography.</p>
+      </div>
+    </section>
+
+    <!-- 4. OUTBOX -->
+    <section id="outbox">
+      <h2 class="section-title"><span class="num">4</span> Outbox Pattern &amp; CDC</h2>
+      <div class="block why">
+        <div class="block-label">Vấn đề: dual write không nguyên tử</div>
+        <p>Cần "update DB" VÀ "publish event" cùng lúc. Nhưng DB commit và Kafka publish là hai hệ thống khác nhau — không có transaction chung. Nếu DB commit xong rồi publish lỗi → event mất; nếu publish xong rồi DB rollback → event ma.</p>
+      </div>
+      <div class="dg">
+        <div class="dg-title">Outbox: ghi thay đổi + event vào CÙNG một DB transaction</div>
+        <div class="dg-row scroll top">
+          <div class="dg-group" style="border-style:solid;border-color:var(--accent)">
+            <span class="grp-label" style="color:var(--accent)">1 DB Transaction (nguyên tử)</span>
+            <div class="node green sm">UPDATE orders SET status='paid'</div>
+            <div class="node green sm">INSERT INTO outbox (event)</div>
+          </div>
+          <div class="arrow-h" style="width:30px"></div>
+          <div class="node accent">Relay / CDC<span class="sub">đọc bảng outbox</span></div>
+          <div class="arrow-h grn" style="width:30px"></div>
+          <div class="node purple">Kafka</div>
+          <div class="arrow-h" style="width:30px"></div>
+          <div class="node muted sm">mark published</div>
+        </div>
+        <div class="dg-note">Vì DB change + event nằm chung 1 transaction → nếu DB commit thì event CHẮC CHẮN sẽ được publish (relay retry tới khi thành công). At-least-once → consumer cần idempotent.</div>
+      </div>
+      <div class="block how">
+        <div class="block-label">CDC (Change Data Capture)</div>
+        <p>Thay vì poll bảng outbox, đọc trực tiếp <strong>transaction log</strong> của DB (WAL PostgreSQL / binlog MySQL) và stream thay đổi ra message queue. Công cụ: Debezium, Maxwell. Ưu điểm: không cần sửa code ứng dụng, độ trễ thấp. Có thể thay hoàn toàn outbox hoặc kết hợp (đọc outbox qua CDC).</p>
+      </div>
+    </section>
+
+    <!-- 5. IDEMPOTENCY -->
+    <section id="idempotency">
+      <h2 class="section-title"><span class="num">5</span> Idempotency</h2>
+      <div class="dg">
+        <div class="dg-title">Idempotent consumer — chống xử lý trùng (at-least-once)</div>
+        <div class="dg-wrap">
+          <div class="node accent wide">Nhận message (có thể trùng)</div>
+          <div class="arrow-v"></div>
+          <div class="node purple" style="max-width:320px">message ID đã có trong processed store?</div>
+          <div class="dg-row dg-gap-lg" style="margin-top:6px">
+            <div class="dg-col"><span class="arrow-lbl" style="color:var(--accent-2)">đã có</span><div class="node green sm">skip (đã xử lý)</div></div>
+            <div class="dg-col"><span class="arrow-lbl">chưa có</span><div class="node accent sm">xử lý + lưu ID<span class="sub">trong CÙNG transaction</span></div></div>
+          </div>
+        </div>
+        <div class="dg-note">Lưu message ID + business logic trong cùng transaction → đảm bảo "xử lý đúng một lần" về mặt nghiệp vụ dù delivery là at-least-once.</div>
+      </div>
+      <table>
+        <tr><th>Loại thao tác</th><th>Idempotent tự nhiên?</th><th>Cách làm idempotent</th></tr>
+        <tr><td>GET, PUT (absolute), DELETE</td><td>Có</td><td>—</td></tr>
+        <tr><td>POST tạo resource</td><td>Không</td><td>Idempotency key + dedup store</td></tr>
+        <tr><td>PATCH tương đối (<code>balance += 10</code>)</td><td>Không</td><td>Unique operation ID, ledger entry</td></tr>
+      </table>
+    </section>
+
+    <!-- 6. RETRY -->
+    <section id="retry">
+      <h2 class="section-title"><span class="num">6</span> Retry &amp; Exponential Backoff</h2>
+      <div class="dg">
+        <div class="dg-title">Exponential backoff + jitter (base=100ms)</div>
+        <div class="dg-row scroll">
+          <div class="node sm">try 1<span class="sub">ngay</span></div>
+          <div class="arrow-h" style="width:20px"></div>
+          <div class="node sm">try 2<span class="sub">~100ms + jitter</span></div>
+          <div class="arrow-h" style="width:20px"></div>
+          <div class="node sm">try 3<span class="sub">~200ms + jitter</span></div>
+          <div class="arrow-h" style="width:20px"></div>
+          <div class="node sm">try 4<span class="sub">~400ms + jitter</span></div>
+          <div class="arrow-h" style="width:20px"></div>
+          <div class="node muted sm">… cap ở maxDelay</div>
+        </div>
+        <div class="dg-note">Delay nhân đôi mỗi lần → giảm áp lực; jitter (ngẫu nhiên) → tránh thundering herd khi nhiều client cùng retry.</div>
+      </div>
+      <div class="grid-2">
+        <div class="col">
+          <h4>NÊN retry (transient)</h4>
+          <ul style="margin-left:18px">
+            <li>5xx server error</li>
+            <li>Timeout, network error</li>
+            <li>429 (theo Retry-After)</li>
+            <li>Connection reset</li>
+          </ul>
+        </div>
+        <div class="col">
+          <h4>KHÔNG retry</h4>
+          <ul style="margin-left:18px">
+            <li>4xx client error (400, 401, 403)</li>
+            <li>409 Conflict (state không đổi)</li>
+            <li>Non-idempotent không có key</li>
+            <li>Circuit breaker đang Open</li>
+          </ul>
+        </div>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Vì sao cần jitter</div>
+        <p>Không jitter: 100 client cùng timeout lúc t → cùng retry lúc t+1s → dội server lần nữa → lại timeout → chu kỳ lặp (retry storm). Jitter phân tán thời điểm retry ngẫu nhiên, phá đồng bộ hóa.</p>
+      </div>
+    </section>
+
+    <!-- 7. CIRCUIT BREAKER -->
+    <section id="circuit">
+      <h2 class="section-title"><span class="num">7</span> Circuit Breaker</h2>
+      <div class="dg">
+        <div class="dg-title">Máy trạng thái 3 pha — chặn cascading failure</div>
+        <div class="dg-row dg-gap-lg">
+          <div class="dg-col">
+            <div class="node green big">CLOSED<span class="sub">bình thường, đếm lỗi</span></div>
+            <span class="arrow-lbl" style="color:var(--danger)">lỗi &gt; ngưỡng ↓</span>
+          </div>
+          <div class="arrow-h" style="width:50px"></div>
+          <div class="dg-col">
+            <div class="node red big">OPEN<span class="sub">fail nhanh, không gọi downstream</span></div>
+            <span class="arrow-lbl">sau timeout ↓</span>
+          </div>
+          <div class="arrow-h" style="width:50px"></div>
+          <div class="dg-col">
+            <div class="node orange big">HALF-OPEN<span class="sub">thử 1 request</span></div>
+          </div>
+        </div>
+        <div class="dg-row dg-gap-lg" style="margin-top:10px">
+          <span class="arrow-lbl" style="color:var(--accent-2)">HALF-OPEN → thành công → CLOSED</span>
+          <span class="arrow-lbl" style="color:var(--danger)">HALF-OPEN → lỗi → OPEN</span>
+        </div>
+      </div>
+      <div class="block why">
+        <div class="block-label">Vì sao dùng circuit breaker</div>
+        <p>Khi downstream chết, mọi request đều timeout → goroutine dồn ứ, tài nguyên cạn, lỗi lan ngược lên (cascading failure). Circuit breaker <strong>fail nhanh</strong> (Open) thay vì chờ timeout, cho downstream thời gian hồi phục, và tự thăm dò (Half-Open). Kết hợp với fallback/graceful degradation.</p>
+      </div>
+    </section>
+
+    <!-- 8. RATE LIMITING -->
+    <section id="ratelimit">
+      <h2 class="section-title"><span class="num">8</span> Rate Limiting</h2>
+      <div class="dg">
+        <div class="dg-row dg-gap-lg top">
+          <div class="dg-group">
+            <span class="grp-label">Token Bucket</span>
+            <div class="cells"><span class="cell fill sm">●</span><span class="cell fill sm">●</span><span class="cell fill sm">●</span><span class="cell empty sm">·</span></div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)">token nạp đều R/s · request lấy 1 token · cho phép BURST tới size bucket</span>
+          </div>
+          <div class="dg-group">
+            <span class="grp-label">Sliding Window</span>
+            <div class="cells"><span class="cell hot sm">t1</span><span class="cell hot sm">t2</span><span class="cell hot sm">t3</span></div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)">đếm request trong cửa sổ trượt · chính xác · KHÔNG cho burst · tốn bộ nhớ hơn</span>
+          </div>
+        </div>
+      </div>
+      <table>
+        <tr><th>Thuật toán</th><th>Đặc điểm</th><th>Dùng khi</th></tr>
+        <tr><td>Token Bucket</td><td>Cho phép burst, đơn giản, ít bộ nhớ</td><td>API cho phép spike ngắn</td></tr>
+        <tr><td>Leaky Bucket</td><td>Rate đều, không burst</td><td>Làm mượt traffic ra</td></tr>
+        <tr><td>Fixed Window</td><td>Đơn giản, có spike ở ranh giới window</td><td>Đếm thô</td></tr>
+        <tr><td>Sliding Window</td><td>Chính xác, chặt</td><td>Enforce rate nghiêm ngặt</td></tr>
+      </table>
+      <div class="block how">
+        <div class="block-label">Distributed rate limit — race condition</div>
+        <p>Nhiều instance check+increment không nguyên tử: cả hai đọc count=99 (&lt;100), cả hai tăng → thành 101 (vượt limit). Fix: dùng <strong>Redis Lua script</strong> (check + increment nguyên tử) hoặc <code>INCR</code> + <code>EXPIRE</code> trong MULTI/EXEC.</p>
+      </div>
+    </section>
+
+    <!-- 9. RELIABILITY PATTERNS -->
+    <section id="patterns">
+      <h2 class="section-title"><span class="num">9</span> Reliability Patterns tổng hợp</h2>
+      <div class="dg">
+        <div class="dg-title">Defense-in-depth: nhiều lớp bảo vệ cho mỗi external call</div>
+        <div class="dg-wrap">
+          <div class="node accent wide" style="text-align:left">Timeout<span class="sub">mọi external call có deadline</span></div>
+          <div class="arrow-v"></div>
+          <div class="node accent wide" style="text-align:left">Retry + backoff + jitter<span class="sub">chỉ lỗi transient</span></div>
+          <div class="arrow-v"></div>
+          <div class="node accent wide" style="text-align:left">Circuit breaker<span class="sub">chặn cascading, fail nhanh</span></div>
+          <div class="arrow-v"></div>
+          <div class="node accent wide" style="text-align:left">Bulkhead<span class="sub">cô lập tài nguyên (pool riêng)</span></div>
+          <div class="arrow-v"></div>
+          <div class="node green wide" style="text-align:left">Fallback / graceful degradation<span class="sub">trả data cũ / giá trị mặc định</span></div>
+        </div>
+      </div>
+      <div class="block how">
+        <div class="block-label">Bulkhead — cô lập lỗi</div>
+        <p>Như vách ngăn tàu thủy: chia tài nguyên (connection pool, goroutine) thành ngăn riêng cho từng dependency. Nếu service A cạn pool của nó, service B vẫn hoạt động. Ngăn một dependency chậm làm sập toàn bộ.</p>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Distributed lock — điểm yếu</div>
+        <p>Lock dựa TTL có rủi ro: clock skew, GC pause khiến holder tưởng còn giữ lock nhưng đã hết hạn → hai client cùng vào critical section. Giải pháp chặt: <strong>fencing token</strong> — token tăng dần, storage từ chối token cũ hơn token đã thấy.</p>
+      </div>
+    </section>
+
+    <!-- FLASHCARDS -->
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>CAP theorem — giải thích thực tế.</span><span class="icon">+</span></div>
+        <div class="a"><p>Hệ phân tán chỉ giữ 2/3: Consistency, Availability, Partition tolerance. Vì mạng luôn có thể partition (P bắt buộc), thực chất chọn: CP (từ chối request để giữ nhất quán) hay AP (trả data cũ để giữ khả dụng). "CA" chỉ có ở hệ một node.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Eventual consistency chấp nhận khi nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Khi business chịu được data cũ tạm thời và user không nhận ra: feed, analytics, đếm view, recommendation. KHÔNG chấp nhận: tiền, tồn kho, authentication.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>2PC có vấn đề gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Blocking: coordinator chết sau Prepare → participant khóa tài nguyên chờ mãi. Đồng bộ (mọi participant phải sẵn sàng), single point of failure, không partition-tolerant. Thay bằng Saga cho microservices.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Saga: choreography vs orchestration?</span><span class="icon">+</span></div>
+        <div class="a"><p>Choreography: service phát/nghe event, loose coupling, không SPOF, nhưng khó trace. Orchestration: coordinator điều phối, dễ hiểu, xử lý lỗi tập trung, nhưng orchestrator là SPOF. Luồng &gt;3 bước → orchestration.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Payment thành công nhưng Inventory lỗi — recover thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Saga compensation: Inventory phát event thất bại → Payment nghe → Refund → Order nghe → Cancel. Chạy compensation ngược chiều các bước đã hoàn tất. Compensation phải idempotent.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Outbox pattern giải quyết gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Dual write không nguyên tử: update DB + publish event là 2 hệ thống, không có transaction chung. Outbox: ghi DB change + event vào cùng 1 DB transaction; relay/CDC đọc outbox rồi publish. Nếu DB commit → event chắc chắn được publish (at-least-once).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>CDC là gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Change Data Capture: đọc transaction log của DB (WAL/binlog) và stream thay đổi ra message queue. Công cụ Debezium/Maxwell. Không cần sửa code app, độ trễ thấp. Có thể thay hoặc kết hợp outbox.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Chống double charge khi retry?</span><span class="icon">+</span></div>
+        <div class="a"><p>Idempotency key: client gửi key duy nhất; server check store → completed trả cached, processing trả 409, chưa có thì lock + xử lý + lưu. Consumer idempotent: lưu message ID + business logic trong cùng transaction, skip nếu ID đã xử lý.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao retry cần jitter?</span><span class="icon">+</span></div>
+        <div class="a"><p>Không jitter: nhiều client cùng timeout → cùng retry một lúc → dội server lần nữa (retry storm/thundering herd). Jitter thêm ngẫu nhiên vào delay → phân tán thời điểm retry, phá đồng bộ hóa.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Khi nào KHÔNG nên retry?</span><span class="icon">+</span></div>
+        <div class="a"><p>4xx (400/401/403 — sẽ lỗi lại), 409 Conflict (state không đổi), thao tác non-idempotent không có key, circuit breaker đang Open. Chỉ retry lỗi transient: 5xx, timeout, network error, 429 (theo Retry-After).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Circuit breaker — 3 trạng thái?</span><span class="icon">+</span></div>
+        <div class="a"><p>Closed (bình thường, đếm lỗi; vượt ngưỡng → Open). Open (fail nhanh, không gọi downstream; sau timeout → Half-Open). Half-Open (thử 1 request; thành công → Closed, lỗi → Open). Chặn cascading failure, cho downstream hồi phục.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Token bucket vs sliding window?</span><span class="icon">+</span></div>
+        <div class="a"><p>Token bucket: token nạp đều, request lấy 1 token, cho phép burst tới size bucket, ít bộ nhớ. Sliding window: đếm request trong cửa sổ trượt, chính xác, không cho burst, tốn bộ nhớ hơn. Bucket cho API cho phép spike; sliding cho enforce chặt.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Distributed rate limit race condition — fix?</span><span class="icon">+</span></div>
+        <div class="a"><p>Nhiều instance check+increment không nguyên tử → cùng đọc 99, cùng tăng → vượt limit. Fix: Redis Lua script (check+increment atomic) hoặc INCR+EXPIRE trong MULTI/EXEC.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Distributed lock có điểm yếu gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Lock TTL: clock skew, GC pause khiến holder tưởng còn giữ nhưng đã hết hạn → 2 client cùng vào critical section. Fix chặt: fencing token — token tăng dần, storage từ chối token cũ hơn token đã thấy.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Bulkhead pattern?</span><span class="icon">+</span></div>
+        <div class="a"><p>Như vách ngăn tàu thủy: chia tài nguyên (pool, goroutine) thành ngăn riêng cho từng dependency. Một dependency cạn pool riêng thì không ảnh hưởng dependency khác → ngăn cascading failure.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="week5.html"><span class="dir">← Trước</span><span class="title">Week 5 · DB/Redis/MQ</span></a>
+      <a href="week7.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 7 · System Design</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,1037 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 1 – Go Core + Memory (Deep Dive) | Senior Go Interview</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Golang knowledge</div></a>
+      <div class="sub">Deep Dive</div>
+    </div>
+    <h2>Week 1 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#foundation">0. Value Semantics</a>
+      <a href="#vars">1. Variables &amp; iota</a>
+      <a href="#pointers">2. Pointers</a>
+      <a href="#slice">3. Slice (deep)</a>
+      <a href="#map">4. Map (deep)</a>
+      <a href="#struct">5. Struct &amp; Alignment</a>
+      <a href="#interface">6. Interface (deep)</a>
+      <a href="#string">7. String / rune / byte</a>
+      <a href="#error">8. Error</a>
+      <a href="#defer">9. Defer / panic / recover</a>
+      <a href="#generics">10. Generics</a>
+      <a href="#memory">11. Stack / Heap / Escape</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html" class="active">Week 1 · Go Core</a>
+      <a href="week2.html">Week 2 · Concurrency</a>
+      <a href="week3.html">Week 3 · Runtime</a>
+      <a href="week4.html">Week 4 · Backend</a>
+      <a href="week5.html">Week 5 · DB/Redis/MQ</a>
+      <a href="week6.html">Week 6 · Distributed</a>
+      <a href="week7.html">Week 7 · System Design</a>
+      <a href="week8.html">Week 8 · Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 1 · Deep Dive</span>
+      <h1>Go Core + Memory</h1>
+      <p>Không chỉ "cái gì" mà là "tại sao Go thiết kế như vậy", "cơ chế ẩn hoạt động ra sao", và "khi nào dùng cái gì". Đây là nền tảng để trả lời mọi câu hỏi Go ở tầng senior.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★★</b><span>Priority</span></div>
+        <div class="item"><b>12</b><span>Chủ đề sâu</span></div>
+        <div class="item"><b>~15h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <p>Triết lý của Go: <strong>simplicity, explicitness, và composition thay vì inheritance</strong>. Mọi cơ chế "ẩn" bên dưới (slice growth, map evacuation, interface dispatch, escape analysis) đều phục vụ hai mục tiêu: <em>predictable performance</em> và <em>code dễ đọc</em>. Khi hiểu động cơ thiết kế, bạn sẽ tự suy ra được hành vi thay vì học thuộc.</p>
+      <div class="tldr">
+        <div class="label">TL;DR — 12 điều phải nắm chắc</div>
+        <ul>
+          <li>Go truyền tham số <strong>luôn theo value (copy)</strong> — slice/map/channel chỉ là header nhỏ trỏ tới data chung.</li>
+          <li>Slice = <code>{ptr, len, cap}</code>. <code>append</code> khi <code>len==cap</code> mới cấp array mới. Sub-slice chia sẻ backing array.</li>
+          <li>Map = hash table bucket 8 slot, <strong>không thread-safe</strong>, iterate ngẫu nhiên có chủ đích.</li>
+          <li>Interface = <code>{type, data}</code>. Nil interface ≠ typed-nil. Method set quyết định value/pointer implement.</li>
+          <li>Struct có <strong>alignment/padding</strong> — thứ tự field ảnh hưởng kích thước.</li>
+          <li>String immutable, UTF-8; <code>len</code> đếm byte; range đi theo rune.</li>
+          <li>Error là value; wrap bằng <code>%w</code>; check bằng <code>errors.Is/As</code>.</li>
+          <li>Defer chạy LIFO, arg evaluate ngay; sửa được named return.</li>
+          <li>Generics dùng <strong>GC-shape stenciling + dictionaries</strong>, không phải template C++.</li>
+          <li>Escape analysis quyết định stack/heap tại compile-time.</li>
+          <li>Stack goroutine <strong>contiguous, growable</strong> (2KB → copy khi đầy).</li>
+          <li>Go memory model: không đồng bộ = không đảm bảo thứ tự thấy được giữa goroutine.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ 0. FOUNDATION ============ -->
+    <section id="foundation">
+      <h2 class="section-title"><span class="num">0</span> Nền tảng: Value Semantics &amp; Type System</h2>
+      <p>Trước khi đi vào từng type, phải hiểu nguyên lý xuyên suốt Go: <strong>mọi thứ được truyền theo value</strong>. Không có "pass by reference" trong Go — chỉ có pass-by-value, trong đó value đôi khi <em>là</em> một pointer.</p>
+
+      <div class="block why">
+        <div class="block-label">Tại sao Go chọn value semantics?</div>
+        <ul>
+          <li><strong>Dễ suy luận:</strong> khi gọi <code>f(x)</code>, bạn biết <code>x</code> không bị thay đổi trừ khi truyền pointer rõ ràng. Không có aliasing ngầm.</li>
+          <li><strong>Tối ưu escape analysis:</strong> compiler biết value không escape → cấp phát trên stack → không tạo áp lực GC.</li>
+          <li><strong>Cache-friendly:</strong> value nằm liền kề trong bộ nhớ, tận dụng CPU cache tốt hơn con trỏ rải rác (pointer chasing).</li>
+        </ul>
+      </div>
+
+      <h3>"Reference types" thực chất là gì?</h3>
+      <p>Nhiều người gọi slice, map, channel là "reference type". Chính xác hơn: chúng là <strong>value type chứa một pointer bên trong</strong>. Khi copy, bạn copy cái header nhỏ nhưng vẫn trỏ về cùng data.</p>
+      <table>
+        <tr><th>Type</th><th>Header copy khi truyền</th><th>Data chung?</th><th>Kích thước header (64-bit)</th></tr>
+        <tr><td><code>slice</code></td><td>ptr + len + cap</td><td>backing array</td><td>24 bytes</td></tr>
+        <tr><td><code>map</code></td><td>1 pointer tới hmap</td><td>toàn bộ map</td><td>8 bytes</td></tr>
+        <tr><td><code>chan</code></td><td>1 pointer tới hchan</td><td>toàn bộ channel</td><td>8 bytes</td></tr>
+        <tr><td><code>string</code></td><td>ptr + len</td><td>byte array (immutable)</td><td>16 bytes</td></tr>
+        <tr><td><code>array</code> <code>[N]T</code></td><td>copy TOÀN BỘ N phần tử</td><td>không — độc lập</td><td>N × sizeof(T)</td></tr>
+        <tr><td><code>struct</code></td><td>copy tất cả field</td><td>không — độc lập</td><td>tổng field + padding</td></tr>
+      </table>
+      <div class="block pitfall">
+        <div class="block-label">Hệ quả interview</div>
+        Truyền <code>[1000000]int</code> (array) vào function = copy 8MB mỗi lần gọi. Truyền <code>[]int</code> (slice) = copy 24 bytes. Đây là lý do trong thực tế gần như luôn dùng slice, không dùng array lớn.
+      </div>
+    </section>
+
+    <!-- ============ 1. VARIABLES ============ -->
+    <section id="vars">
+      <h2 class="section-title"><span class="num">1</span> Variables, Zero Values &amp; Constants</h2>
+
+      <div class="concept">
+        <div class="concept-head">Zero Value — "không có null pointer exception về logic"</div>
+        <div class="concept-body">
+          <p>Mọi biến trong Go được khởi tạo <strong>zero value</strong> nếu không gán rõ ràng. Đây là quyết định thiết kế quan trọng.</p>
+          <div class="block why">
+            <div class="block-label">Tại sao có zero value?</div>
+            <p>Loại bỏ trạng thái "uninitialized" (nguồn bug lớn trong C/C++). Mọi type có một giá trị hợp lệ mặc định, giúp struct dùng được ngay mà không cần constructor. Đây là nền tảng của idiom <strong>"make the zero value useful"</strong> (vd: <code>sync.Mutex{}</code>, <code>bytes.Buffer{}</code> dùng được ngay).</p>
+          </div>
+          <table>
+            <tr><th>Type</th><th>Zero value</th></tr>
+            <tr><td>số (int, float)</td><td><code>0</code></td></tr>
+            <tr><td>bool</td><td><code>false</code></td></tr>
+            <tr><td>string</td><td><code>""</code> (không phải nil)</td></tr>
+            <tr><td>pointer, slice, map, chan, func, interface</td><td><code>nil</code></td></tr>
+            <tr><td>struct</td><td>struct với mọi field zero</td></tr>
+          </table>
+          <div class="block pitfall">
+            <div class="block-label">Bẫy: nil map vs nil slice</div>
+            <p>Đọc từ nil map OK (trả zero value), nhưng <strong>ghi vào nil map → panic</strong>. Ngược lại, <code>append</code> vào nil slice hoàn toàn OK (Go tự cấp phát).</p>
+            <pre><code><span class="tok-kw">var</span> m <span class="tok-kw">map</span>[<span class="tok-type">string</span>]<span class="tok-type">int</span>   <span class="tok-com">// nil</span>
+_ = m[<span class="tok-str">"x"</span>]              <span class="tok-com">// OK → 0</span>
+m[<span class="tok-str">"x"</span>] = <span class="tok-num">1</span>            <span class="tok-com">// PANIC: assignment to entry in nil map</span>
+
+<span class="tok-kw">var</span> s []<span class="tok-type">int</span>            <span class="tok-com">// nil</span>
+s = <span class="tok-fn">append</span>(s, <span class="tok-num">1</span>)       <span class="tok-com">// OK → [1]</span></code></pre>
+          </div>
+        </div>
+      </div>
+
+      <h3>Constants &amp; <code>iota</code></h3>
+      <p>Constant trong Go được đánh giá tại compile-time và có thể là <strong>untyped</strong> — cho phép độ chính xác tùy ý cho tới khi được gán.</p>
+      <pre><code><span class="tok-kw">const</span> (
+    _  = <span class="tok-fn">iota</span>             <span class="tok-com">// 0, bỏ qua</span>
+    KB = <span class="tok-num">1</span> &lt;&lt; (<span class="tok-num">10</span> * <span class="tok-fn">iota</span>)  <span class="tok-com">// 1 << 10 = 1024</span>
+    MB                       <span class="tok-com">// 1 << 20</span>
+    GB                       <span class="tok-com">// 1 << 30</span>
+)</code></pre>
+      <div class="block how">
+        <div class="block-label">Cơ chế untyped constant</div>
+        <p><code>const x = 1 &lt;&lt; 40</code> hợp lệ dù vượt int32, vì untyped constant có độ chính xác ít nhất 256 bit. Chỉ khi gán vào biến có type cụ thể mới bị kiểm tra tràn. Điều này cho phép viết <code>math.Pi</code> chính xác cao dùng được cho cả float32 lẫn float64.</p>
+      </div>
+    </section>
+
+    <!-- ============ 2. POINTERS ============ -->
+    <section id="pointers">
+      <h2 class="section-title"><span class="num">2</span> Pointers</h2>
+      <p>Go có pointer nhưng <strong>không có pointer arithmetic</strong> (trừ khi dùng <code>unsafe</code>). Đây là lựa chọn thiết kế then chốt.</p>
+
+      <div class="grid-2">
+        <div class="col">
+          <h4>Tại sao Go có pointer?</h4>
+          <ul style="margin-left:18px">
+            <li>Cho phép mutate giá trị của caller (in-place).</li>
+            <li>Tránh copy struct lớn.</li>
+            <li>Biểu diễn "optional" (nil = vắng mặt).</li>
+            <li>Chia sẻ state giữa các phần code.</li>
+          </ul>
+        </div>
+        <div class="col">
+          <h4>Tại sao KHÔNG có pointer arithmetic?</h4>
+          <ul style="margin-left:18px">
+            <li>An toàn bộ nhớ — không thể trỏ ra ngoài vùng hợp lệ.</li>
+            <li>Cho phép <strong>GC di chuyển</strong> stack (contiguous stack) mà không phá pointer.</li>
+            <li>Đơn giản hóa mô hình cho lập trình viên.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="block how">
+        <div class="block-label">Cơ chế ẩn: pointer &amp; GC</div>
+        <p>Vì không có pointer arithmetic, GC luôn biết chính xác đâu là pointer, đâu là data. Điều này cho phép <strong>precise GC</strong> (không phải conservative như một số ngôn ngữ khác) và cho phép runtime <strong>di chuyển goroutine stack</strong> (khi stack grow) rồi cập nhật lại toàn bộ pointer trỏ vào stack đó.</p>
+      </div>
+
+      <h3><code>new(T)</code> vs <code>&amp;T{}</code></h3>
+      <table>
+        <tr><th>Cách</th><th>Trả về</th><th>Ghi chú</th></tr>
+        <tr><td><code>new(T)</code></td><td><code>*T</code> trỏ tới zero value</td><td>Hiếm dùng, thường cho type cơ bản</td></tr>
+        <tr><td><code>&amp;T{...}</code></td><td><code>*T</code> với field khởi tạo</td><td>Idiomatic, phổ biến</td></tr>
+      </table>
+      <div class="block best">
+        <div class="block-label">Best practice</div>
+        <p>Không "sợ" pointer nhưng cũng đừng lạm dụng. Trả pointer khi: struct lớn, cần mutate, hoặc cần biểu diễn nil. Trả value khi: struct nhỏ immutable. Việc trả pointer thường khiến biến <strong>escape lên heap</strong> → tăng GC (xem mục 11).</p>
+      </div>
+    </section>
+
+    <!-- ============ 3. SLICE DEEP ============ -->
+    <section id="slice">
+      <h2 class="section-title"><span class="num">3</span> Slice — Deep Dive</h2>
+      <p>Slice là type được hỏi nhiều nhất. Phải hiểu tới mức dự đoán chính xác giá trị sau mỗi thao tác.</p>
+
+      <div class="concept">
+        <div class="concept-head">Bản chất: Slice Header</div>
+        <div class="concept-body">
+          <pre><code><span class="tok-kw">type</span> <span class="tok-type">slice</span> <span class="tok-kw">struct</span> {
+    array unsafe.Pointer  <span class="tok-com">// trỏ tới phần tử đầu trong backing array</span>
+    len   <span class="tok-type">int</span>             <span class="tok-com">// số phần tử truy cập được</span>
+    cap   <span class="tok-type">int</span>             <span class="tok-com">// số phần tử tối đa từ array[0] tới hết backing</span>
+}</code></pre>
+          <div class="dg">
+            <div class="dg-title"><code>slice := make([]int, 3, 6)</code></div>
+            <div class="dg-row scroll">
+              <div class="node accent">slice header<span class="sub">array ptr · len=3 · cap=6</span></div>
+              <div class="arrow-h acc" style="width:50px"></div>
+              <div class="dg-col">
+                <span class="grp-label">backing array</span>
+                <div class="cells">
+                  <span class="cell fill">0</span><span class="cell fill">0</span><span class="cell fill">0</span>
+                  <span class="cell empty">?</span><span class="cell empty">?</span><span class="cell empty">?</span>
+                </div>
+                <div class="dg-row" style="gap:12px;width:100%;justify-content:center">
+                  <span class="arrow-lbl" style="color:var(--accent-2)">len = 3 (đọc/ghi được)</span>
+                  <span class="arrow-lbl">cap = 6 (đã cấp phát)</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="block why">
+            <div class="block-label">Tại sao tách len và cap?</div>
+            <p><strong>len</strong> = phần bạn được phép đọc/ghi. <strong>cap</strong> = phần đã cấp phát sẵn. Tách hai giá trị cho phép <code>append</code> ghi vào vùng đã cấp mà chưa dùng, tránh cấp phát lại liên tục → <strong>amortized O(1) append</strong>.</p>
+          </div>
+        </div>
+      </div>
+
+      <h3>Cơ chế <code>append</code> &amp; Growth Algorithm</h3>
+      <div class="steps">
+        <div class="step"><div class="step-title">Kiểm tra capacity</div>Nếu <code>len &lt; cap</code>: ghi vào <code>array[len]</code>, tăng len. Không cấp phát mới → cực nhanh.</div>
+        <div class="step"><div class="step-title">Hết capacity → tính cap mới</div>Runtime gọi <code>growslice</code>. Áp dụng công thức tăng trưởng (xem dưới).</div>
+        <div class="step"><div class="step-title">Cấp array mới &amp; copy</div>Cấp backing array mới, copy toàn bộ phần tử cũ sang, rồi ghi phần tử mới.</div>
+        <div class="step"><div class="step-title">Trả slice header mới</div>Pointer bây giờ trỏ tới array mới. Slice cũ (nếu còn ai giữ) vẫn trỏ array cũ.</div>
+      </div>
+
+      <div class="block how">
+        <div class="block-label">Growth algorithm (Go 1.18+)</div>
+        <ul>
+          <li>Nếu cap cần thiết &gt; 2× cap hiện tại → dùng luôn cap cần thiết.</li>
+          <li>Nếu cap hiện tại &lt; 256 → <strong>gấp đôi</strong>.</li>
+          <li>Nếu cap ≥ 256 → tăng theo công thức mượt: <code>newcap += (newcap + 3*256) / 4</code> (xấp xỉ +25%, hội tụ dần từ 2× về 1.25×).</li>
+          <li>Cuối cùng làm tròn theo size class của memory allocator (nên cap thực tế có thể lớn hơn số bạn nghĩ).</li>
+        </ul>
+        <p style="margin-top:8px"><em>Lưu ý:</em> trước Go 1.18 ngưỡng là 1024 và tăng đúng 25%. Đừng học thuộc con số tuyệt đối — hãy hiểu <strong>ý tưởng</strong>: nhỏ thì gấp đôi (giảm số lần realloc), lớn thì tăng chậm hơn (tiết kiệm bộ nhớ).</p>
+      </div>
+
+      <h4>Sơ đồ: append khi hết capacity</h4>
+      <div class="dg">
+        <div class="dg-row top dg-gap-lg scroll">
+          <div class="dg-col">
+            <span class="grp-label">TRƯỚC append · len==cap==3</span>
+            <div class="dg-row">
+              <div class="node red">header<span class="sub">len=3 · cap=3</span></div>
+              <div class="arrow-h red" style="width:36px"></div>
+              <div class="cells"><span class="cell fill">1</span><span class="cell fill">2</span><span class="cell fill">3</span></div>
+            </div>
+          </div>
+          <div class="arrow" style="font-size:22px;color:var(--accent-2)">→</div>
+          <div class="dg-col">
+            <span class="grp-label">SAU append(s,4) · realloc</span>
+            <div class="dg-row">
+              <div class="node green">header<span class="sub">len=4 · cap=6</span></div>
+              <div class="arrow-h grn" style="width:36px"></div>
+              <div class="cells"><span class="cell fill">1</span><span class="cell fill">2</span><span class="cell fill">3</span><span class="cell fill">4</span><span class="cell empty">·</span><span class="cell empty">·</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="dg-note">Khi <code>len==cap</code>: cấp backing MỚI, copy 1,2,3 rồi ghi 4. Array cũ còn sống nếu slice khác trỏ vào, không thì bị GC. Đây là gốc rễ của aliasing trap.</div>
+      </div>
+
+      <h3>Aliasing Trap — câu hỏi kinh điển</h3>
+      <pre><code>a := []<span class="tok-type">int</span>{<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>, <span class="tok-num">4</span>, <span class="tok-num">5</span>}
+b := a[<span class="tok-num">1</span>:<span class="tok-num">3</span>]           <span class="tok-com">// b=[2,3]  len=2 cap=4 (từ index 1 tới hết backing)</span>
+b = <span class="tok-fn">append</span>(b, <span class="tok-num">99</span>)     <span class="tok-com">// cap còn dư → ghi đè a[3]=99, KHÔNG cấp mới</span>
+<span class="tok-com">// a = [1 2 3 99 5]   ← a bị thay đổi!</span>
+<span class="tok-com">// b = [2 3 99]</span></code></pre>
+      <div class="grid-2">
+        <div class="col">
+          <h4>Nguyên nhân</h4>
+          <p><code>b</code> chia sẻ backing array với <code>a</code> và còn dư cap. <code>append</code> ghi vào ô kế tiếp — chính là <code>a[3]</code>.</p>
+        </div>
+        <div class="col">
+          <h4>Cách chặn: 3-index slice</h4>
+          <p><code>b := a[1:3:3]</code> → cap=2 (=max−low). Append buộc cấp array mới, <code>a</code> an toàn.</p>
+        </div>
+      </div>
+
+      <h3>Slice Memory Leak</h3>
+      <pre><code><span class="tok-com">// BAD: giữ 1 byte nhưng ghim cả 10MB không cho GC</span>
+<span class="tok-kw">func</span> <span class="tok-fn">firstByte</span>(huge []<span class="tok-type">byte</span>) []<span class="tok-type">byte</span> {
+    <span class="tok-kw">return</span> huge[:<span class="tok-num">1</span>]   <span class="tok-com">// backing 10MB vẫn reachable</span>
+}
+<span class="tok-com">// GOOD: copy → tách khỏi backing lớn</span>
+<span class="tok-kw">func</span> <span class="tok-fn">firstByte</span>(huge []<span class="tok-type">byte</span>) []<span class="tok-type">byte</span> {
+    out := <span class="tok-fn">make</span>([]<span class="tok-type">byte</span>, <span class="tok-num">1</span>)
+    <span class="tok-fn">copy</span>(out, huge[:<span class="tok-num">1</span>])
+    <span class="tok-kw">return</span> out
+}</code></pre>
+
+      <h3>nil slice vs empty slice</h3>
+      <table>
+        <tr><th></th><th><code>var s []int</code> (nil)</th><th><code>s := []int{}</code> (empty)</th></tr>
+        <tr><td>== nil</td><td>true</td><td>false</td></tr>
+        <tr><td>len / cap</td><td>0 / 0</td><td>0 / 0</td></tr>
+        <tr><td>append được?</td><td>có</td><td>có</td></tr>
+        <tr><td>JSON marshal</td><td><code>null</code></td><td><code>[]</code></td></tr>
+      </table>
+      <div class="tbl-cap">→ Ưu tiên nil slice làm zero value; chỉ dùng empty slice khi cần JSON ra <code>[]</code>.</div>
+
+      <div class="proscons">
+        <div class="pros">
+          <h4>Ưu điểm slice</h4>
+          <ul>
+            <li>Linh hoạt, kích thước động.</li>
+            <li>Truyền rẻ (chỉ copy 24 bytes header).</li>
+            <li>Append amortized O(1).</li>
+            <li>Sub-slice zero-copy.</li>
+          </ul>
+        </div>
+        <div class="cons">
+          <h4>Nhược / cạm bẫy</h4>
+          <ul>
+            <li>Aliasing ngầm gây bug khó thấy.</li>
+            <li>Có thể ghim backing array lớn (leak).</li>
+            <li>Growth gây realloc + copy nếu không pre-allocate.</li>
+            <li>Không thread-safe khi ghi đồng thời.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Best practices</div>
+        <ul>
+          <li><strong>Pre-allocate</strong> khi biết size: <code>make([]T, 0, n)</code> → tránh realloc lặp lại.</li>
+          <li>Dùng <strong>3-index slice</strong> khi trả sub-slice ra ngoài để tránh aliasing.</li>
+          <li><code>copy</code> khi cần tách khỏi backing lớn.</li>
+          <li>Xóa phần tử giữ thứ tự: <code>s = append(s[:i], s[i+1:]...)</code>; không giữ thứ tự (nhanh hơn): swap với phần tử cuối rồi cắt.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ 4. MAP DEEP ============ -->
+    <section id="map">
+      <h2 class="section-title"><span class="num">4</span> Map — Deep Dive</h2>
+
+      <div class="concept">
+        <div class="concept-head">Cấu trúc: hmap + bmap (bucket)</div>
+        <div class="concept-body">
+          <pre><code><span class="tok-kw">type</span> <span class="tok-type">hmap</span> <span class="tok-kw">struct</span> {
+    count     <span class="tok-type">int</span>            <span class="tok-com">// len(map)</span>
+    B         <span class="tok-type">uint8</span>          <span class="tok-com">// số bucket = 2^B</span>
+    hash0     <span class="tok-type">uint32</span>         <span class="tok-com">// seed hash ngẫu nhiên (mỗi map khác nhau)</span>
+    buckets   unsafe.Pointer <span class="tok-com">// mảng 2^B bucket</span>
+    oldbuckets unsafe.Pointer <span class="tok-com">// buckets cũ khi đang grow</span>
+    nevacuate uintptr        <span class="tok-com">// tiến độ di dời</span>
+}
+<span class="tok-kw">type</span> <span class="tok-type">bmap</span> <span class="tok-kw">struct</span> {  <span class="tok-com">// mỗi bucket giữ 8 cặp</span>
+    tophash [<span class="tok-num">8</span>]<span class="tok-type">uint8</span>    <span class="tok-com">// 8 bit cao của hash mỗi key</span>
+    <span class="tok-com">// keys[8], values[8], overflow *bmap  (bố trí ngầm)</span>
+}</code></pre>
+          <div class="block why">
+            <div class="block-label">Tại sao bucket chứa 8 slot &amp; lưu keys/values tách riêng?</div>
+            <ul>
+              <li><strong>8 slot:</strong> khớp với 64-bit word của tophash → so sánh nhanh 8 key cùng lúc, tận dụng cache line.</li>
+              <li><strong>keys gộp rồi tới values</strong> (không xen kẽ key/value): tránh padding do alignment khi key và value có size khác nhau → tiết kiệm bộ nhớ. Đây là chi tiết tối ưu ẩn ít người biết.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <h3>Cơ chế lookup <code>m[key]</code></h3>
+      <div class="steps">
+        <div class="step"><div class="step-title">Hash key</div>Tính <code>hash(key, hash0)</code>. Dùng B bit thấp để chọn bucket.</div>
+        <div class="step"><div class="step-title">So khớp tophash</div>Lấy 8 bit cao của hash so với mảng <code>tophash[8]</code> trong bucket — reject nhanh slot không khớp mà không cần so sánh full key.</div>
+        <div class="step"><div class="step-title">So sánh key đầy đủ</div>Với slot tophash khớp, so sánh key thật sự (xử lý hash collision).</div>
+        <div class="step"><div class="step-title">Overflow bucket</div>Nếu bucket đầy 8 slot, đi tiếp theo con trỏ overflow (linked list).</div>
+      </div>
+
+      <h3>Incremental Growth (Evacuation)</h3>
+      <div class="block how">
+        <div class="block-label">Cơ chế ẩn: tại sao grow không giật lag</div>
+        <p>Khi load factor &gt; 6.5 hoặc quá nhiều overflow bucket, map cần grow gấp đôi số bucket. Nhưng thay vì di dời toàn bộ cùng lúc (gây pause dài), Go dùng <strong>incremental evacuation</strong>: giữ <code>oldbuckets</code>, và mỗi lần <code>insert/delete</code> di dời 1–2 bucket từ old sang new. Sau khi hết, oldbuckets được giải phóng. Nhờ vậy chi phí grow được <strong>trải đều</strong>, mỗi thao tác vẫn amortized O(1).</p>
+      </div>
+      <div class="dg">
+        <div class="dg-title">Grow: cấp buckets mới gấp đôi, giữ nguyên buckets cũ, di dời dần</div>
+        <div class="dg-row top dg-gap-lg scroll">
+          <div class="node accent">hmap<span class="sub">oldbuckets · buckets · nevacuate=0</span></div>
+          <div class="dg-col">
+            <span class="grp-label">oldbuckets (4)</span>
+            <div class="cells"><span class="cell fill">B0</span><span class="cell fill">B1</span><span class="cell fill">B2</span><span class="cell fill">B3</span></div>
+          </div>
+          <div class="arrow" style="font-size:20px;color:var(--accent-2)">→</div>
+          <div class="dg-col">
+            <span class="grp-label">buckets mới (8)</span>
+            <div class="cells"><span class="cell empty">·</span><span class="cell empty">·</span><span class="cell empty">·</span><span class="cell empty">·</span><span class="cell empty">·</span><span class="cell empty">·</span><span class="cell empty">·</span><span class="cell empty">·</span></div>
+          </div>
+        </div>
+        <div class="dg-wrap" style="margin-top:14px;gap:8px">
+          <div class="dg-row"><div class="node muted sm">B0</div><div class="arrow-h grn" style="width:40px"></div><span class="arrow-lbl">chia theo bit hash mới</span><div class="arrow-h grn" style="width:40px"></div><div class="dg-row" style="gap:6px"><div class="node green sm">bucket 0</div><div class="node green sm">bucket 4</div></div></div>
+          <div class="dg-row"><div class="node muted sm">B1</div><div class="arrow-h grn" style="width:40px"></div><span class="arrow-lbl">nevacuate++</span><div class="arrow-h grn" style="width:40px"></div><div class="dg-row" style="gap:6px"><div class="node green sm">bucket 1</div><div class="node green sm">bucket 5</div></div></div>
+        </div>
+        <div class="dg-note">Mỗi insert/delete di dời 1–2 bucket. Xong hết → <code>oldbuckets=nil</code>. Không có "stop the world"; chi phí trải đều trên nhiều thao tác.</div>
+      </div>
+
+      <h3>Không thread-safe &amp; iteration ngẫu nhiên</h3>
+      <div class="grid-2">
+        <div class="col">
+          <h4>Concurrent access → panic</h4>
+          <p>Runtime có cờ <code>hashWriting</code>; nếu phát hiện ghi đồng thời → <code>fatal error: concurrent map writes</code>. Đây là <strong>panic không recover được</strong>, không phải data race thường.</p>
+        </div>
+        <div class="col">
+          <h4>Vì sao iterate ngẫu nhiên?</h4>
+          <p><code>hash0</code> khác nhau + điểm bắt đầu iterate ngẫu nhiên. <strong>Cố ý</strong> để lập trình viên không phụ thuộc vào thứ tự — nếu cần thứ tự phải tự sort key.</p>
+        </div>
+      </div>
+
+      <h3>Giải pháp concurrent: Mutex vs sync.Map</h3>
+      <table>
+        <tr><th>Giải pháp</th><th>Khi nào dùng</th><th>Cơ chế</th></tr>
+        <tr><td><code>Mutex + map</code></td><td>Mặc định, write nhiều</td><td>Lock toàn map</td></tr>
+        <tr><td><code>RWMutex + map</code></td><td>Read &gt;&gt; write</td><td>Nhiều reader song song, 1 writer</td></tr>
+        <tr><td><code>sync.Map</code></td><td>Key ổn định / disjoint keys per goroutine</td><td>read map (lock-free) + dirty map</td></tr>
+      </table>
+      <div class="block how">
+        <div class="block-label">sync.Map hoạt động thế nào?</div>
+        <p>Giữ 2 map bên trong: <strong>read</strong> (atomic, đọc không cần lock) và <strong>dirty</strong> (có lock). Read hit → không lock. Read miss nhiều lần → promote dirty thành read. Tối ưu cho <em>đọc nhiều, key ít thay đổi</em>. Ghi mới liên tục thì <strong>chậm hơn</strong> Mutex+map do overhead duy trì 2 map.</p>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Không lấy được địa chỉ phần tử map</div>
+        <p><code>&amp;m["a"]</code> → compile error. Vì evacuation có thể di dời phần tử sang địa chỉ khác → pointer sẽ dangling. Muốn mutate: lấy ra, sửa, gán lại; hoặc dùng <code>map[K]*V</code>.</p>
+      </div>
+    </section>
+
+    <!-- ============ 5. STRUCT ============ -->
+    <section id="struct">
+      <h2 class="section-title"><span class="num">5</span> Struct, Memory Layout &amp; Embedding</h2>
+
+      <h3>Alignment &amp; Padding — cơ chế ẩn ảnh hưởng size</h3>
+      <p>CPU đọc bộ nhớ theo word (thường 8 byte). Field phải <strong>aligned</strong> theo size của nó. Compiler chèn <strong>padding</strong> để đảm bảo, nên <em>thứ tự field ảnh hưởng kích thước struct</em>.</p>
+      <div class="grid-2">
+        <div class="col">
+          <h4>Bố trí kém — 24 bytes</h4>
+          <pre style="margin:0"><code><span class="tok-kw">struct</span> {
+  a <span class="tok-type">bool</span>   <span class="tok-com">// 1 + 7 pad</span>
+  b <span class="tok-type">int64</span>  <span class="tok-com">// 8</span>
+  c <span class="tok-type">bool</span>   <span class="tok-com">// 1 + 7 pad</span>
+}</code></pre>
+        </div>
+        <div class="col">
+          <h4>Bố trí tốt — 16 bytes</h4>
+          <pre style="margin:0"><code><span class="tok-kw">struct</span> {
+  b <span class="tok-type">int64</span>  <span class="tok-com">// 8</span>
+  a <span class="tok-type">bool</span>   <span class="tok-com">// 1</span>
+  c <span class="tok-type">bool</span>   <span class="tok-com">// 1 + 6 pad</span>
+}</code></pre>
+        </div>
+      </div>
+      <div class="bytes">
+        <div class="byte used">a<small>1B</small></div>
+        <div class="byte pad">pad<small>7B</small></div>
+        <div class="byte used">b<small>8B</small></div>
+        <div class="byte used">c<small>1B</small></div>
+        <div class="byte pad">pad<small>7B</small></div>
+      </div>
+      <div class="tbl-cap">Bố trí kém: field bool xen giữa int64 tạo padding thừa.</div>
+      <div class="block best">
+        <div class="block-label">Best practice</div>
+        <p>Sắp field <strong>từ lớn tới nhỏ</strong> (int64/pointer → int32 → int16 → bool) để giảm padding. Với struct dùng số lượng cực lớn (hàng triệu), việc này tiết kiệm đáng kể RAM. Công cụ: <code>fieldalignment</code> (govet) tự phát hiện.</p>
+      </div>
+
+      <h3>Embedding — Composition thay vì Inheritance</h3>
+      <pre><code><span class="tok-kw">type</span> <span class="tok-type">Logger</span> <span class="tok-kw">struct</span>{ prefix <span class="tok-type">string</span> }
+<span class="tok-kw">func</span> (l *<span class="tok-type">Logger</span>) <span class="tok-fn">Log</span>(msg <span class="tok-type">string</span>) { ... }
+
+<span class="tok-kw">type</span> <span class="tok-type">Server</span> <span class="tok-kw">struct</span> {
+    *<span class="tok-type">Logger</span>          <span class="tok-com">// embedded — không có tên field</span>
+    addr <span class="tok-type">string</span>
+}
+s.<span class="tok-fn">Log</span>(<span class="tok-str">"hi"</span>)  <span class="tok-com">// method promoted — gọi trực tiếp qua Server</span></code></pre>
+      <div class="block why">
+        <div class="block-label">Tại sao composition, không inheritance?</div>
+        <ul>
+          <li>Tránh "fragile base class" và cây kế thừa sâu khó bảo trì.</li>
+          <li><strong>Method promotion</strong> cho khả năng tái dùng mà không tạo quan hệ "is-a" cứng nhắc.</li>
+          <li>Kết hợp tốt với interface: struct tự động thỏa interface nếu embedded type thỏa.</li>
+        </ul>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Embedding ≠ subtyping</div>
+        <p><code>Server</code> KHÔNG phải là <code>Logger</code>. Nếu hàm nhận <code>*Logger</code>, không truyền thẳng <code>*Server</code> được (phải <code>s.Logger</code>). Promotion chỉ áp dụng cho method/field, không phải quan hệ type.</p>
+      </div>
+    </section>
+
+    <!-- ============ 6. INTERFACE DEEP ============ -->
+    <section id="interface">
+      <h2 class="section-title"><span class="num">6</span> Interface — Deep Dive</h2>
+
+      <div class="concept">
+        <div class="concept-head">Hai biểu diễn: eface &amp; iface</div>
+        <div class="concept-body">
+          <pre><code><span class="tok-com">// interface{} / any — không method</span>
+<span class="tok-kw">type</span> <span class="tok-type">eface</span> <span class="tok-kw">struct</span> {
+    _type *_type          <span class="tok-com">// mô tả type động</span>
+    data  unsafe.Pointer  <span class="tok-com">// trỏ tới value</span>
+}
+<span class="tok-com">// interface có method</span>
+<span class="tok-kw">type</span> <span class="tok-type">iface</span> <span class="tok-kw">struct</span> {
+    tab  *itab            <span class="tok-com">// itab = interface type + concrete type + method table</span>
+    data unsafe.Pointer   <span class="tok-com">// trỏ tới value</span>
+}
+<span class="tok-kw">type</span> <span class="tok-type">itab</span> <span class="tok-kw">struct</span> {
+    inter *interfacetype  <span class="tok-com">// interface nào</span>
+    _type *_type          <span class="tok-com">// concrete type nào</span>
+    hash  <span class="tok-type">uint32</span>          <span class="tok-com">// để type switch nhanh</span>
+    fun   [<span class="tok-num">1</span>]uintptr       <span class="tok-com">// bảng con trỏ hàm (variable length)</span>
+}</code></pre>
+          <div class="block how">
+            <div class="block-label">Dynamic dispatch hoạt động thế nào</div>
+            <p>Gọi <code>i.Method()</code>: runtime lấy <code>itab.fun[k]</code> (con trỏ tới implementation của concrete type) rồi gọi gián tiếp với <code>data</code> làm receiver. <code>itab</code> được <strong>cache</strong> theo cặp (interface, concrete type) nên chỉ tính 1 lần.</p>
+          </div>
+          <div class="dg">
+            <div class="dg-title"><code>var w io.Writer = &amp;File{fd: 3}</code></div>
+            <div class="dg-row top scroll">
+              <div class="node accent">iface (w)<span class="sub">tab · data</span></div>
+              <div class="arrow-h acc" style="width:44px"></div>
+              <div class="node purple wide" style="text-align:left">itab<span class="sub">inter = io.Writer</span><span class="sub">_type = *File</span><span class="sub">hash = 0x… (type switch)</span><span class="sub">fun[0] → (*File).Write</span></div>
+              <div class="arrow-h grn" style="width:44px"></div>
+              <div class="node green">(*File).Write<span class="sub">implementation</span></div>
+            </div>
+            <div class="dg-row" style="margin-top:12px">
+              <div class="node accent sm">data</div>
+              <div class="arrow-h" style="width:44px"></div>
+              <div class="node green">File{fd:3}<span class="sub">làm receiver</span></div>
+            </div>
+            <div class="dg-note"><code>w.Write(p) ≡ itab.fun[0](w.data, p)</code> — gọi gián tiếp qua bảng hàm · ~2-3ns overhead, không inline được.</div>
+          </div>
+        </div>
+      </div>
+
+      <h3>Nil Interface vs Typed Nil — bug #1 trong Go</h3>
+      <pre><code><span class="tok-kw">func</span> <span class="tok-fn">doWork</span>() <span class="tok-type">error</span> {
+    <span class="tok-kw">var</span> err *<span class="tok-type">MyError</span> = <span class="tok-kw">nil</span>
+    <span class="tok-kw">return</span> err          <span class="tok-com">// trả interface {type:*MyError, data:nil}</span>
+}
+<span class="tok-kw">if</span> <span class="tok-fn">doWork</span>() != <span class="tok-kw">nil</span> {   <span class="tok-com">// TRUE! vì type field khác nil</span>
+    <span class="tok-com">// nhánh này chạy dù "không có lỗi"</span>
+}</code></pre>
+      <div class="block why">
+        <div class="block-label">Tại sao lại vậy?</div>
+        <p>Interface value = cặp <code>(type, data)</code>. Nó chỉ <code>== nil</code> khi <strong>cả hai</strong> đều nil. Gán một <code>*MyError</code> nil vào <code>error</code> khiến type field = <code>*MyError</code> (non-nil), data = nil → interface KHÔNG nil.</p>
+      </div>
+      <div class="block best">
+        <div class="block-label">Cách tránh</div>
+        <p>Luôn <code>return nil</code> trực tiếp khi không lỗi. Đừng khai báo biến concrete pointer rồi return. Nếu buộc phải, kiểm tra và trả nil tường minh.</p>
+      </div>
+
+      <h3>Method Set &amp; Addressability</h3>
+      <table>
+        <tr><th>Receiver khai báo</th><th>Value <code>T</code> gọi được</th><th>Pointer <code>*T</code> gọi được</th><th>Thỏa interface bởi</th></tr>
+        <tr><td>value receiver <code>(t T)</code></td><td>có</td><td>có</td><td>cả <code>T</code> và <code>*T</code></td></tr>
+        <tr><td>pointer receiver <code>(t *T)</code></td><td>chỉ khi addressable</td><td>có</td><td>chỉ <code>*T</code></td></tr>
+      </table>
+      <div class="block how">
+        <div class="block-label">Cơ chế: tại sao pointer receiver không vào method set của T</div>
+        <p>Nếu <code>T</code> (không addressable, vd giá trị trong map hay return value) được phép có pointer-receiver method trong method set, Go sẽ phải tự động lấy địa chỉ của một value tạm — mutate lên bản copy đó vô nghĩa. Nên Go cấm để tránh bug ngầm. Ví dụ kinh điển: <code>var a Animal = Dog{}</code> lỗi compile nếu <code>Speak()</code> là pointer receiver.</p>
+      </div>
+
+      <h3>Type Assertion &amp; Type Switch</h3>
+      <pre><code>v, ok := i.(<span class="tok-type">string</span>)   <span class="tok-com">// dạng comma-ok: an toàn, không panic</span>
+v := i.(<span class="tok-type">string</span>)       <span class="tok-com">// panic nếu sai type</span>
+
+<span class="tok-kw">switch</span> x := i.(<span class="tok-kw">type</span>) {
+<span class="tok-kw">case</span> <span class="tok-type">int</span>:    <span class="tok-com">// x là int</span>
+<span class="tok-kw">case</span> <span class="tok-type">string</span>: <span class="tok-com">// x là string</span>
+}</code></pre>
+      <div class="block how">
+        <div class="block-label">Chi phí</div>
+        <p>Type assertion so sánh <code>itab.hash</code> / pointer type — rất nhanh (vài ns). Nhưng lạm dụng type switch trong hot path là dấu hiệu thiết kế nên dùng interface method hoặc generics thay thế.</p>
+      </div>
+
+      <div class="proscons">
+        <div class="pros">
+          <h4>Ưu điểm interface</h4>
+          <ul>
+            <li>Decoupling — code phụ thuộc hành vi, không phụ thuộc implementation.</li>
+            <li>Dễ test (mock qua interface nhỏ).</li>
+            <li>Duck typing tĩnh: implement ngầm, không cần <code>implements</code>.</li>
+          </ul>
+        </div>
+        <div class="cons">
+          <h4>Nhược điểm</h4>
+          <ul>
+            <li>Method call gián tiếp (~2-3ns), không inline được.</li>
+            <li>Đưa value vào interface thường gây <strong>heap escape</strong> (boxing).</li>
+            <li>Interface lớn khó implement/test.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Best practices (idiomatic)</div>
+        <ul>
+          <li><strong>"Accept interfaces, return structs"</strong> — hàm nhận interface (linh hoạt), trả concrete type (rõ ràng).</li>
+          <li>Interface nhỏ, tập trung 1 hành vi (<code>io.Reader</code>, <code>io.Writer</code>). "The bigger the interface, the weaker the abstraction."</li>
+          <li>Định nghĩa interface ở <strong>nơi dùng</strong> (consumer), không phải nơi implement.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ 7. STRING ============ -->
+    <section id="string">
+      <h2 class="section-title"><span class="num">7</span> String / rune / byte</h2>
+      <pre><code><span class="tok-kw">type</span> <span class="tok-type">stringHeader</span> <span class="tok-kw">struct</span> {
+    Data unsafe.Pointer  <span class="tok-com">// trỏ tới byte array</span>
+    Len  <span class="tok-type">int</span>             <span class="tok-com">// độ dài tính bằng BYTE</span>
+}</code></pre>
+      <div class="block why">
+        <div class="block-label">Tại sao string immutable?</div>
+        <ul>
+          <li><strong>An toàn chia sẻ:</strong> nhiều string có thể share cùng backing mà không sợ bị sửa → substring zero-copy.</li>
+          <li><strong>Dùng làm map key an toàn.</strong></li>
+          <li><strong>Thread-safe đọc</strong> không cần lock.</li>
+        </ul>
+      </div>
+      <div class="dg">
+        <div class="dg-title"><code>s := "Hello, World"</code> · <code>sub := s[7:]</code> — không copy, chia sẻ backing</div>
+        <div class="dg-wrap">
+          <div class="cells" style="gap:3px">
+            <span class="cell fill sm">H</span><span class="cell fill sm">e</span><span class="cell fill sm">l</span><span class="cell fill sm">l</span><span class="cell fill sm">o</span><span class="cell fill sm">,</span><span class="cell fill sm">␣</span>
+            <span class="cell hot sm">W</span><span class="cell hot sm">o</span><span class="cell hot sm">r</span><span class="cell hot sm">l</span><span class="cell hot sm">d</span>
+          </div>
+          <div class="dg-row dg-gap-lg" style="margin-top:8px">
+            <div class="dg-col">
+              <div class="node accent">s<span class="sub">Data → index 0 · Len=12</span></div>
+              <span class="arrow-lbl" style="color:var(--accent)">↑ trỏ đầu chuỗi</span>
+            </div>
+            <div class="dg-col">
+              <div class="node orange">sub<span class="sub">Data → index 7 · Len=5</span></div>
+              <span class="arrow-lbl" style="color:var(--accent-3)">↑ trỏ vào giữa (chữ W)</span>
+            </div>
+          </div>
+        </div>
+        <div class="dg-note">Bytes bất biến nên chia sẻ an toàn → substring O(1), không cấp phát.</div>
+      </div>
+      <table>
+        <tr><th>Khái niệm</th><th>Bản chất</th></tr>
+        <tr><td><code>byte</code></td><td>alias <code>uint8</code> — 1 byte thô</td></tr>
+        <tr><td><code>rune</code></td><td>alias <code>int32</code> — 1 Unicode code point</td></tr>
+        <tr><td><code>len(s)</code></td><td>số byte (KHÔNG phải số ký tự)</td></tr>
+        <tr><td><code>range s</code></td><td>lặp theo rune, i = byte offset</td></tr>
+      </table>
+      <pre><code>s := <span class="tok-str">"Hello, 世界"</span>
+<span class="tok-fn">len</span>(s)          <span class="tok-com">// 13 bytes ("世界" = 6 bytes)</span>
+<span class="tok-fn">len</span>([]<span class="tok-type">rune</span>(s))  <span class="tok-com">// 9 ký tự</span></code></pre>
+      <div class="block pitfall">
+        <div class="block-label">Nối chuỗi trong vòng lặp</div>
+        <p><code>s += x</code> tạo string mới mỗi lần (immutable) → O(n²). Dùng <code>strings.Builder</code> (ghi vào <code>[]byte</code> nội bộ, cấp phát amortized) → O(n).</p>
+        <pre style="margin-top:8px"><code><span class="tok-kw">var</span> b strings.<span class="tok-type">Builder</span>
+b.<span class="tok-fn">Grow</span>(n)              <span class="tok-com">// pre-allocate nếu biết size</span>
+<span class="tok-kw">for</span> ... { b.<span class="tok-fn">WriteString</span>(x) }
+result := b.<span class="tok-fn">String</span>()      <span class="tok-com">// zero-copy convert []byte → string</span></code></pre>
+      </div>
+      <div class="block how">
+        <div class="block-label">Cơ chế: []byte(s) và string([]byte) có copy không?</div>
+        <p>Thông thường <strong>CÓ copy</strong> (vì string immutable còn []byte mutable). Nhưng compiler tối ưu một số trường hợp không escape (vd <code>string(b)</code> chỉ dùng làm map key tạm thời) để tránh cấp phát. <code>strings.Builder.String()</code> dùng <code>unsafe</code> để tránh copy vì nó đảm bảo không ai sửa buffer nữa.</p>
+      </div>
+    </section>
+
+    <!-- ============ 8. ERROR ============ -->
+    <section id="error">
+      <h2 class="section-title"><span class="num">8</span> Error Handling</h2>
+      <div class="block why">
+        <div class="block-label">Triết lý: errors are values</div>
+        <p>Go không dùng exception cho luồng lỗi thông thường. Lỗi là giá trị trả về bình thường → luồng xử lý <strong>tường minh</strong>, không có control flow "nhảy" ẩn. Đánh đổi: verbose (<code>if err != nil</code> nhiều), nhưng dễ đọc và không bỏ sót lỗi.</p>
+      </div>
+      <pre><code><span class="tok-kw">type</span> <span class="tok-type">error</span> <span class="tok-kw">interface</span> { <span class="tok-fn">Error</span>() <span class="tok-type">string</span> }</code></pre>
+
+      <div class="grid-2">
+        <div class="col">
+          <h4>Sentinel error</h4>
+          <pre style="margin:0"><code><span class="tok-kw">var</span> ErrNotFound = errors.<span class="tok-fn">New</span>(<span class="tok-str">"not found"</span>)
+<span class="tok-com">// check: errors.Is(err, ErrNotFound)</span></code></pre>
+        </div>
+        <div class="col">
+          <h4>Custom typed error</h4>
+          <pre style="margin:0"><code><span class="tok-kw">type</span> <span class="tok-type">HTTPError</span> <span class="tok-kw">struct</span>{ Code <span class="tok-type">int</span> }
+<span class="tok-kw">func</span> (e *<span class="tok-type">HTTPError</span>) <span class="tok-fn">Error</span>() <span class="tok-type">string</span> {..}
+<span class="tok-com">// check: errors.As(err, &target)</span></code></pre>
+        </div>
+      </div>
+
+      <h3>Wrapping — chuỗi lỗi có ngữ cảnh</h3>
+      <table>
+        <tr><th></th><th>Tác dụng</th></tr>
+        <tr><td><code>fmt.Errorf("...: %w", err)</code></td><td>Wrap, GIỮ chain → unwrap được</td></tr>
+        <tr><td><code>fmt.Errorf("...: %v", err)</code></td><td>Chỉ format string, PHÁ chain</td></tr>
+        <tr><td><code>errors.Is(err, target)</code></td><td>Có target trong chain? (so value)</td></tr>
+        <tr><td><code>errors.As(err, &amp;t)</code></td><td>Có type khớp trong chain? gán vào t</td></tr>
+      </table>
+      <div class="block best">
+        <div class="block-label">Best practices</div>
+        <ul>
+          <li>Wrap khi thêm ngữ cảnh: <code>fmt.Errorf("query user %d: %w", id, err)</code>.</li>
+          <li>Chỉ wrap 1 lần mỗi tầng, tránh chuỗi lỗi quá dài lặp thông tin.</li>
+          <li>Sentinel cho lỗi cần so sánh; typed error khi cần mang dữ liệu (code, field).</li>
+          <li>Không log <em>và</em> return cùng lúc (double logging) — chọn một tầng để log.</li>
+          <li>Panic chỉ cho lỗi lập trình (bug), không cho lỗi vận hành (file not found).</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ 9. DEFER ============ -->
+    <section id="defer">
+      <h2 class="section-title"><span class="num">9</span> Defer / Panic / Recover</h2>
+
+      <h3>Ba quy tắc defer</h3>
+      <div class="steps">
+        <div class="step"><div class="step-title">LIFO</div>Defer khai báo sau chạy trước (như stack).</div>
+        <div class="step"><div class="step-title">Arguments evaluate ngay</div>Tham số của hàm defer được tính tại lúc gặp <code>defer</code>, không phải lúc chạy.</div>
+        <div class="step"><div class="step-title">Sửa được named return</div>Closure defer có thể đọc/ghi named return value.</div>
+      </div>
+      <pre><code><span class="tok-kw">func</span> <span class="tok-fn">f</span>() (x <span class="tok-type">int</span>) {   <span class="tok-com">// named return</span>
+    <span class="tok-kw">defer</span> <span class="tok-kw">func</span>(){ x++ }()
+    <span class="tok-kw">return</span> <span class="tok-num">5</span>            <span class="tok-com">// gán x=5, defer tăng → trả về 6</span>
+}
+<span class="tok-kw">func</span> <span class="tok-fn">g</span>() {
+    x := <span class="tok-num">0</span>
+    <span class="tok-kw">defer</span> fmt.<span class="tok-fn">Println</span>(x)  <span class="tok-com">// in 0 (đã "chụp" x lúc này)</span>
+    x = <span class="tok-num">10</span>
+}</code></pre>
+
+      <div class="block how">
+        <div class="block-label">Cơ chế ẩn: open-coded defers (Go 1.14+)</div>
+        <p>Trước đây mỗi <code>defer</code> tạo một record đẩy vào linked list runtime → chậm. Từ Go 1.14, nếu số defer biết trước tại compile-time (không nằm trong loop), compiler dùng <strong>open-coded defers</strong>: chèn thẳng lời gọi vào cuối hàm + dùng bitmask để biết defer nào cần chạy. Kết quả: defer gần như <strong>zero-cost</strong> trong trường hợp thường gặp. Defer trong vòng lặp thì vẫn dùng cơ chế heap cũ (chậm hơn).</p>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Bẫy: defer trong loop</div>
+        <p><code>for { defer f.Close() }</code> → các Close dồn tới cuối hàm, không đóng ngay → rò rỉ file descriptor. Giải pháp: bọc thân loop trong 1 hàm/closure, hoặc gọi Close tường minh.</p>
+      </div>
+
+      <h3>Panic / Recover</h3>
+      <div class="block how">
+        <div class="block-label">Luồng panic</div>
+        <p>Panic dừng thực thi bình thường, chạy các defer đã đăng ký (unwind stack). Nếu một defer gọi <code>recover()</code>, panic dừng lại và hàm trả về bình thường từ điểm đó. Nếu không có recover, panic lan tới top của goroutine → crash toàn chương trình.</p>
+      </div>
+      <pre><code><span class="tok-kw">func</span> <span class="tok-fn">safeHandler</span>() {
+    <span class="tok-kw">defer</span> <span class="tok-kw">func</span>() {
+        <span class="tok-kw">if</span> r := <span class="tok-fn">recover</span>(); r != <span class="tok-kw">nil</span> {
+            log.<span class="tok-fn">Printf</span>(<span class="tok-str">"recovered: %v"</span>, r)
+        }
+    }()
+    <span class="tok-fn">mightPanic</span>()
+}</code></pre>
+      <div class="block best">
+        <div class="block-label">Best practices</div>
+        <ul>
+          <li>Dùng panic cho <strong>bug không thể tiếp tục</strong> (invariant bị phá), không cho lỗi thường.</li>
+          <li>Recover ở <strong>ranh giới</strong>: HTTP middleware, worker goroutine — tránh 1 request làm sập server.</li>
+          <li><code>recover()</code> chỉ hiệu lực khi gọi trực tiếp trong defer.</li>
+          <li>Panic ở goroutine khác KHÔNG bị recover ở goroutine cha bắt được.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ 10. GENERICS ============ -->
+    <section id="generics">
+      <h2 class="section-title"><span class="num">10</span> Generics (Go 1.18+)</h2>
+      <pre><code><span class="tok-kw">type</span> <span class="tok-type">Number</span> <span class="tok-kw">interface</span> { ~<span class="tok-type">int</span> | ~<span class="tok-type">float64</span> }
+
+<span class="tok-kw">func</span> <span class="tok-fn">Sum</span>[<span class="tok-type">T</span> <span class="tok-type">Number</span>](xs []<span class="tok-type">T</span>) <span class="tok-type">T</span> {
+    <span class="tok-kw">var</span> s <span class="tok-type">T</span>
+    <span class="tok-kw">for</span> _, x := <span class="tok-kw">range</span> xs { s += x }
+    <span class="tok-kw">return</span> s
+}</code></pre>
+      <table>
+        <tr><th>Ký hiệu</th><th>Ý nghĩa</th></tr>
+        <tr><td><code>[T any]</code></td><td>type param, mọi type</td></tr>
+        <tr><td><code>~int</code></td><td>underlying type approximation — match cả <code>type MyInt int</code></td></tr>
+        <tr><td><code>comparable</code></td><td>hỗ trợ <code>==</code>, dùng làm map key</td></tr>
+        <tr><td><code>A | B</code></td><td>union — A hoặc B</td></tr>
+      </table>
+      <div class="block how">
+        <div class="block-label">Cơ chế ẩn: GC-shape stenciling + dictionaries</div>
+        <p>Go KHÔNG monomorphize toàn bộ như template C++ (tránh code bloat), cũng không boxing hết như Java generics (tránh chậm). Thay vào đó dùng cách lai: các type có <strong>cùng "GC shape"</strong> (cùng cách bố trí bộ nhớ, vd mọi pointer share 1 shape) dùng <strong>chung một bản compiled code</strong>, và thông tin type cụ thể được truyền qua một <strong>dictionary</strong> ẩn tại runtime. Hệ quả: generic đôi khi chậm hơn code viết tay một chút do gián tiếp qua dictionary.</p>
+      </div>
+      <div class="dg">
+        <div class="dg-title">GC-shape stenciling: type cùng shape dùng chung một bản code</div>
+        <div class="dg-row dg-gap-lg top scroll">
+          <div class="dg-col">
+            <div class="dg-row"><div class="node accent sm">Sum[int]</div><div class="node accent sm">Sum[int64]</div></div>
+            <div class="arrow-v grn"></div>
+            <div class="node green wide">1 bản code · shape "số 8 byte"</div>
+          </div>
+          <div class="dg-col">
+            <div class="dg-row"><div class="node accent sm">Sum[*User]</div><div class="node accent sm">Sum[*Order]</div></div>
+            <div class="arrow-v grn"></div>
+            <div class="node green wide">1 bản code khác · shape "pointer"</div>
+          </div>
+        </div>
+        <div class="dg-row" style="margin-top:16px">
+          <div class="node accent">Sum[int](xs)</div>
+          <div class="arrow-h" style="width:40px"></div>
+          <div class="node purple">dictionary[int]<span class="sub">size · cách so sánh · con trỏ hàm</span></div>
+          <div class="arrow-h" style="width:40px"></div>
+          <div class="node green wide">code Sum dùng chung<span class="sub">đọc size từ dict, thao tác theo size</span></div>
+        </div>
+        <table style="margin-top:16px">
+          <tr><th>Chiến lược</th><th>Cách làm</th><th>Đánh đổi</th></tr>
+          <tr><td>C++ template</td><td>mỗi type 1 bản code</td><td>nhanh nhất, code bloat</td></tr>
+          <tr><td>Java generics</td><td>boxing hết về Object</td><td>1 bản code, chậm (box/unbox)</td></tr>
+          <tr><td>Go (shape+dict)</td><td>nhóm theo shape</td><td>cân bằng, overhead nhẹ do dict</td></tr>
+        </table>
+      </div>
+      <div class="block best">
+        <div class="block-label">Khi nào dùng / không dùng</div>
+        <ul>
+          <li><strong>Dùng:</strong> data structure tổng quát (stack, tree, cache), hàm trên slice/map (Map/Filter/Reduce), constraint số học.</li>
+          <li><strong>Không dùng:</strong> khi interface method đủ; khi chỉ 1-2 type cụ thể; khi làm code khó đọc hơn. Idiomatic Go ưu tiên đơn giản.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ 11. MEMORY ============ -->
+    <section id="memory">
+      <h2 class="section-title"><span class="num">11</span> Stack / Heap / Escape Analysis</h2>
+      <div class="mem-legend">
+        <span><span class="dot stack"></span> Stack — nhanh, tự dọn, không GC</span>
+        <span><span class="dot heap"></span> Heap — chậm hơn, GC quản lý, chia sẻ được</span>
+      </div>
+
+      <h3>Contiguous, Growable Stack</h3>
+      <div class="block how">
+        <div class="block-label">Cơ chế: stack goroutine grow thế nào</div>
+        <p>Mỗi goroutine khởi đầu stack chỉ <strong>~2KB</strong>. Khi gần đầy, runtime cấp một stack mới lớn gấp đôi, <strong>copy toàn bộ</strong> nội dung sang, và <strong>cập nhật mọi pointer</strong> trỏ vào stack cũ (làm được nhờ không có pointer arithmetic + precise GC). Stack cũng có thể <strong>co lại</strong> khi dùng ít. Nhờ vậy Go chạy được hàng triệu goroutine mà không tốn RAM như thread OS (mỗi thread ~1-8MB stack cố định).</p>
+      </div>
+      <div class="dg">
+        <div class="dg-row top dg-gap-lg scroll">
+          <div class="dg-col">
+            <span class="grp-label">Stack cũ · 2KB (sắp tràn)</span>
+            <div class="dg-col" style="gap:0">
+              <div class="node accent sm" style="border-radius:8px 8px 0 0">frame main</div>
+              <div class="node accent sm" style="border-radius:0">frame f()</div>
+              <div class="node accent sm" style="border-radius:0">frame g()</div>
+              <div class="node red sm" style="border-radius:0 0 8px 8px">frame h() ← tràn</div>
+            </div>
+          </div>
+          <div class="dg-col">
+            <span class="arrow-lbl">grow ×2 + copy + fix pointers</span>
+            <div class="arrow-h grn" style="width:80px"></div>
+          </div>
+          <div class="dg-col">
+            <span class="grp-label">Stack mới · 4KB (còn chỗ)</span>
+            <div class="dg-col" style="gap:0">
+              <div class="node green sm" style="border-radius:8px 8px 0 0">frame main</div>
+              <div class="node green sm" style="border-radius:0">frame f()</div>
+              <div class="node green sm" style="border-radius:0">frame g()</div>
+              <div class="node green sm" style="border-radius:0">frame h()</div>
+              <div class="node green sm" style="border-radius:0 0 8px 8px">frame i() ← còn chỗ</div>
+            </div>
+          </div>
+        </div>
+        <div class="dg-note">Con trỏ <code>px</code> trỏ vào stack cũ được runtime <strong>cập nhật sang địa chỉ mới</strong>. Điều kiện then chốt: precise GC biết chính xác đâu là pointer → relocate stack an toàn (OS thread không làm được).</div>
+      </div>
+      <div class="grid-2">
+        <div class="col">
+          <h4>Stack</h4>
+          <ul style="margin-left:18px">
+            <li>Cấp phát = dịch con trỏ (1 lệnh).</li>
+            <li>Giải phóng tự động khi hàm return.</li>
+            <li>Không tạo việc cho GC.</li>
+            <li>Cache-friendly (liền kề).</li>
+          </ul>
+        </div>
+        <div class="col">
+          <h4>Heap</h4>
+          <ul style="margin-left:18px">
+            <li>Cần allocator (tcmalloc-style).</li>
+            <li>GC phải trace &amp; thu hồi.</li>
+            <li>Sống lâu, chia sẻ giữa goroutine.</li>
+            <li>Pointer chasing → cache miss.</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>Escape Analysis — quyết định tại compile-time</h3>
+      <div class="block why">
+        <div class="block-label">Mục đích</div>
+        <p>Compiler cố gắng đặt biến trên stack (rẻ). Chỉ khi biến "escape" ra ngoài phạm vi hàm mới buộc lên heap. Mục tiêu: <strong>giảm áp lực GC</strong> mà lập trình viên không phải quản lý bộ nhớ thủ công.</p>
+      </div>
+      <p>Kiểm tra:</p>
+      <pre><code>go build -gcflags=<span class="tok-str">"-m"</span> ./...
+<span class="tok-com">// ./main.go:10:9: &Point{...} escapes to heap</span>
+<span class="tok-com">// ./main.go:5:2:  moved to heap: buf</span></code></pre>
+      <h4>Sơ đồ: cây quyết định của compiler</h4>
+      <div class="dg">
+        <div class="dg-title">Cây quyết định stack vs heap của compiler</div>
+        <div class="dg-wrap">
+          <div class="node accent wide">Khai báo biến local</div>
+          <div class="arrow-v"></div>
+          <div class="node purple" style="max-width:360px">Địa chỉ có "thoát" khỏi hàm?<span class="sub">return &amp;v · gửi chan · gán interface · closure capture</span></div>
+          <div class="dg-row dg-gap-lg top" style="margin-top:6px">
+            <!-- KHÔNG -->
+            <div class="dg-col">
+              <span class="arrow-lbl" style="color:var(--accent-2)">KHÔNG ↓</span>
+              <div class="node" style="max-width:220px">Size biết compile-time &amp; đủ nhỏ?</div>
+              <div class="dg-row dg-gap-lg" style="margin-top:6px">
+                <div class="dg-col"><span class="arrow-lbl" style="color:var(--accent-2)">CÓ</span><div class="node green big">STACK</div></div>
+                <div class="dg-col"><span class="arrow-lbl" style="color:var(--danger)">KHÔNG</span><div class="node red big">HEAP</div><span class="sub" style="font-size:11px;color:var(--text-dim)">make(n runtime), quá lớn</span></div>
+              </div>
+            </div>
+            <!-- CÓ -->
+            <div class="dg-col">
+              <span class="arrow-lbl" style="color:var(--danger)">CÓ ↓</span>
+              <div class="node red big">HEAP</div>
+              <span class="sub" style="font-size:11px;color:var(--text-dim)">GC quản lý</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p>Các trường hợp <span class="pill heap">escape → heap</span>:</p>
+      <table>
+        <tr><th>Trường hợp</th><th>Lý do</th></tr>
+        <tr><td>Return <code>&amp;localVar</code></td><td>Biến phải sống sau khi hàm return</td></tr>
+        <tr><td>Gán value vào <code>interface{}</code></td><td>Boxing — cần địa chỉ ổn định</td></tr>
+        <tr><td>Gửi pointer qua channel</td><td>Goroutine khác có thể giữ</td></tr>
+        <tr><td>Closure capture biến</td><td>Closure có thể sống lâu hơn hàm</td></tr>
+        <tr><td><code>make([]T, n)</code> với n runtime</td><td>Size không biết compile-time</td></tr>
+        <tr><td>Biến quá lớn</td><td>Vượt giới hạn stack frame</td></tr>
+      </table>
+      <div class="block pitfall">
+        <div class="block-label">fmt.Println cũng gây allocation</div>
+        <p><code>fmt.Println(x)</code> nhận <code>...interface{}</code> → mọi tham số bị boxing → escape heap. Đây là lý do các hàm <code>fmt</code> xuất hiện trong allocation profile. Trong hot path, cân nhắc tránh fmt.</p>
+      </div>
+
+      <h3>Value vs Pointer — quyết định cuối cùng</h3>
+      <div class="proscons">
+        <div class="pros">
+          <h4>Ưu tiên VALUE khi</h4>
+          <ul>
+            <li>Struct nhỏ (≤ ~64 bytes).</li>
+            <li>Không cần mutate.</li>
+            <li>Muốn stack allocation / tránh GC.</li>
+            <li>Immutable, an toàn concurrent read.</li>
+          </ul>
+        </div>
+        <div class="cons">
+          <h4>Ưu tiên POINTER khi</h4>
+          <ul>
+            <li>Struct lớn (copy đắt).</li>
+            <li>Cần mutate in-place.</li>
+            <li>Chia sẻ state / biểu diễn nil.</li>
+            <li>Implement interface với pointer receiver.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Nguyên tắc &amp; Go memory model (bonus)</div>
+        <ul>
+          <li><strong>Đo trước khi tối ưu:</strong> đừng đoán stack/heap — dùng <code>-gcflags="-m"</code> và pprof (Week 3).</li>
+          <li>Consistency &gt; micro-optimization: chọn value hoặc pointer receiver nhất quán cho một type.</li>
+          <li><strong>Go memory model:</strong> nếu không có đồng bộ (channel, mutex, atomic), không đảm bảo goroutine này thấy được ghi của goroutine kia. "Đừng giao tiếp bằng chia sẻ bộ nhớ; hãy chia sẻ bộ nhớ bằng cách giao tiếp." (chi tiết ở Week 2).</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ FLASHCARDS ============ -->
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards — Tự kiểm tra</h2>
+      <p>Che đáp án, tự trả lời thành tiếng như đang phỏng vấn, rồi click để đối chiếu.</p>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Go pass-by-value hay pass-by-reference? Vậy slice thì sao?</span><span class="icon">+</span></div>
+        <div class="a"><p>Luôn pass-by-value. Slice là value type chứa header <code>{ptr,len,cap}</code>; copy header nhưng backing array dùng chung. Nên sửa phần tử ảnh hưởng caller, nhưng <code>append</code> có thể không (nếu realloc).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Dự đoán: <code>a:=[]int{1,2,3,4,5}; b:=a[1:3]; b=append(b,99)</code></span><span class="icon">+</span></div>
+        <div class="a"><p><code>a=[1,2,3,99,5]</code>, <code>b=[2,3,99]</code>. Vì <code>cap(b)=4&gt;len(b)=2</code>, append ghi đè <code>a[3]</code>. Chặn bằng <code>a[1:3:3]</code>.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Growth algorithm của slice? Con số tuyệt đối có quan trọng?</span><span class="icon">+</span></div>
+        <div class="a"><p>Ý tưởng: cap nhỏ (&lt;256) gấp đôi để giảm số lần realloc; cap lớn tăng ~25% để tiết kiệm RAM; rồi làm tròn theo size class allocator. Con số cụ thể thay đổi giữa các version — hiểu ý tưởng quan trọng hơn học thuộc.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao map không cho lấy <code>&amp;m["a"]</code>?</span><span class="icon">+</span></div>
+        <div class="a"><p>Incremental evacuation khi grow có thể di dời phần tử sang địa chỉ khác → pointer sẽ dangling. Nên Go cấm lấy địa chỉ. Muốn mutate: dùng <code>map[K]*V</code> hoặc get-modify-set.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Tại sao map iterate ngẫu nhiên? Có phải bug?</span><span class="icon">+</span></div>
+        <div class="a"><p>Cố ý. Hash seed <code>hash0</code> ngẫu nhiên + điểm bắt đầu ngẫu nhiên. Mục đích: buộc lập trình viên không phụ thuộc thứ tự. Cần thứ tự → tự sort keys.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>sync.Map hoạt động thế nào và khi nào dùng?</span><span class="icon">+</span></div>
+        <div class="a"><p>Giữ 2 map: read (atomic, lock-free) + dirty (có lock). Read hit không cần lock. Tối ưu cho đọc nhiều / key ổn định / disjoint keys. Ghi mới liên tục thì chậm hơn Mutex+map.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Nil interface vs typed nil?</span><span class="icon">+</span></div>
+        <div class="a"><p>Interface là cặp (type,data), chỉ <code>==nil</code> khi cả hai nil. Trả một <code>*MyError</code> nil qua <code>error</code> → type field non-nil → interface KHÁC nil. Fix: <code>return nil</code> trực tiếp.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao pointer-receiver method không nằm trong method set của <code>T</code>?</span><span class="icon">+</span></div>
+        <div class="a"><p>Vì gọi trên value không addressable (map element, return value) sẽ mutate lên bản copy tạm — vô nghĩa. Go cấm để tránh bug ngầm. Nên <code>var a Animal = Dog{}</code> lỗi nếu method là pointer receiver.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Thứ tự field struct ảnh hưởng gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Alignment/padding: field phải aligned theo size → compiler chèn padding. Sắp từ lớn tới nhỏ giảm padding → struct nhỏ hơn. Với hàng triệu instance, tiết kiệm RAM đáng kể.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span><code>len(s)</code> của <code>"世界"</code> là bao nhiêu?</span><span class="icon">+</span></div>
+        <div class="a"><p>6 (mỗi ký tự CJK = 3 bytes UTF-8). <code>len</code> đếm byte. <code>len([]rune("世界"))</code> = 2. <code>range</code> đi theo rune.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span><code>%w</code> vs <code>%v</code> khi format error?</span><span class="icon">+</span></div>
+        <div class="a"><p><code>%w</code> wrap giữ chain → <code>errors.Is/As</code> hoạt động. <code>%v</code> chỉ ra string, phá chain → không unwrap được.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Output: <code>func f()(x int){ defer func(){x++}(); return 5 }</code></span><span class="icon">+</span></div>
+        <div class="a"><p>Trả về 6. Named return: <code>return 5</code> gán x=5, rồi defer tăng x lên 6 trước khi hàm thực sự trả về.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Open-coded defers là gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Từ Go 1.14: nếu số defer biết trước compile-time (không trong loop), compiler chèn thẳng lời gọi + bitmask → defer gần như zero-cost. Defer trong loop vẫn dùng cơ chế heap chậm hơn.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Go generics được compile thế nào? Giống C++ template?</span><span class="icon">+</span></div>
+        <div class="a"><p>Không. Dùng GC-shape stenciling + dictionaries: type cùng memory shape share 1 bản code, type info truyền qua dictionary runtime. Cân bằng giữa code bloat (C++) và boxing chậm (Java). Có overhead nhẹ do gián tiếp.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Kể 5 trường hợp biến escape lên heap.</span><span class="icon">+</span></div>
+        <div class="a"><p>1) return <code>&amp;localVar</code>. 2) gán vào interface (boxing). 3) gửi pointer qua channel. 4) closure capture. 5) <code>make</code> với size runtime / biến quá lớn. Kiểm tra: <code>go build -gcflags="-m"</code>.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Goroutine stack khởi đầu bao nhiêu và grow ra sao?</span><span class="icon">+</span></div>
+        <div class="a"><p>~2KB. Khi gần đầy: cấp stack mới ×2, copy toàn bộ, cập nhật mọi pointer (nhờ precise GC + không có pointer arithmetic). Có thể co lại. Cho phép hàng triệu goroutine.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="index.html"><span class="dir">←</span><span class="title">Trang chủ</span></a>
+      <a href="week2.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 2 · Concurrency</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

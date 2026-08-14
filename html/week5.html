@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 5 – Database + Redis + Messaging (Deep Dive) | Senior Go Interview</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Golang knowledge</div></a>
+      <div class="sub">Deep Dive</div>
+    </div>
+    <h2>Week 5 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#index">1. Index &amp; B-Tree</a>
+      <a href="#txn">2. Transaction &amp; Isolation</a>
+      <a href="#mvcc">3. MVCC &amp; Lock</a>
+      <a href="#pool">4. Connection Pool &amp; N+1</a>
+      <a href="#redis">5. Redis Data Structures</a>
+      <a href="#cache">6. Cache Strategies</a>
+      <a href="#cacheproblems">7. Cache Problems</a>
+      <a href="#kafka">8. Kafka &amp; Delivery</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html">Week 1 · Go Core</a>
+      <a href="week2.html">Week 2 · Concurrency</a>
+      <a href="week3.html">Week 3 · Runtime</a>
+      <a href="week4.html">Week 4 · Backend</a>
+      <a href="week5.html" class="active">Week 5 · DB/Redis/MQ</a>
+      <a href="week6.html">Week 6 · Distributed</a>
+      <a href="week7.html">Week 7 · System Design</a>
+      <a href="week8.html">Week 8 · Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 5 · Deep Dive</span>
+      <h1>Database + Redis + Messaging</h1>
+      <p>Ba trụ cột của backend stateful: index &amp; transaction (SQL), caching (Redis), và messaging (Kafka). Hiểu cơ chế để tối ưu query, tránh cache pitfall, và chọn đúng delivery semantics.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★★</b><span>Priority</span></div>
+        <div class="item"><b>8</b><span>Chủ đề sâu</span></div>
+        <div class="item"><b>~13h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <div class="tldr">
+        <div class="label">TL;DR</div>
+        <ul>
+          <li>B-Tree index: cân bằng, sorted, O(log n); leaf liên kết cho range scan.</li>
+          <li>Composite index tuân <strong>leftmost prefix</strong>; covering index → index-only scan.</li>
+          <li>Isolation levels đổi lấy hiện tượng: dirty/non-repeatable/phantom read.</li>
+          <li><strong>MVCC:</strong> reader không chặn writer nhờ đọc snapshot phiên bản cũ.</li>
+          <li>Connection pool: quá ít → xếp hàng; quá nhiều → quá tải DB.</li>
+          <li><strong>N+1 query:</strong> 1 query list + N query con → dùng JOIN/batch IN.</li>
+          <li>Cache-aside phổ biến nhất: read cache→DB, write DB→invalidate.</li>
+          <li>Ba vấn đề cache: stampede, penetration, avalanche — mỗi cái có cách xử lý riêng.</li>
+          <li>Kafka: ordering chỉ trong partition; delivery at-most/at-least/exactly-once.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 1. INDEX -->
+    <section id="index">
+      <h2 class="section-title"><span class="num">1</span> Index &amp; B-Tree</h2>
+      <div class="dg">
+        <div class="dg-title">B+Tree: dữ liệu ở leaf, leaf liên kết ngang cho range scan</div>
+        <div class="dg-wrap">
+          <div class="node accent big">[50]<span class="sub">root · ít level</span></div>
+          <div class="arrow-v"></div>
+          <div class="dg-row dg-gap-lg">
+            <div class="node accent">[20, 35]<span class="sub">internal</span></div>
+            <div class="node accent">[70, 85]<span class="sub">internal</span></div>
+          </div>
+          <div class="arrow-v"></div>
+          <div class="dg-row scroll">
+            <div class="cells">
+              <span class="cell fill">10</span><span class="cell fill">25</span><span class="cell fill">40</span>
+              <span class="cell fill">60</span><span class="cell fill">75</span><span class="cell fill">90</span>
+            </div>
+          </div>
+          <span class="arrow-lbl" style="color:var(--accent-2)">↔ leaf liên kết ngang (chứa row pointer)</span>
+        </div>
+        <div class="dg-note">Range scan (<code>WHERE x BETWEEN…</code>) đi dọc chuỗi leaf liên kết → hiệu quả.</div>
+      </div>
+      <div class="block why">
+        <div class="block-label">Vì sao B-Tree, không phải binary tree hay hash?</div>
+        <ul>
+          <li><strong>Branching factor lớn:</strong> mỗi node = 1 page (~4-16KB) chứa nhiều key → cây nông (3-4 level cho hàng triệu row) → ít disk I/O. Binary tree quá sâu → nhiều lần đọc disk.</li>
+          <li><strong>Sorted + leaf liên kết:</strong> hỗ trợ range query và ORDER BY. Hash index O(1) cho equality nhưng KHÔNG làm được range.</li>
+        </ul>
+      </div>
+
+      <h3>Composite Index — Leftmost Prefix Rule</h3>
+      <div class="dg">
+        <div class="dg-title">Index <code>(user_id, status, created_at)</code> — sorted như từ điển</div>
+        <div class="dg-wrap" style="gap:8px;align-items:stretch;max-width:640px;margin:0 auto">
+          <div class="dg-row" style="justify-content:flex-start"><div class="node green sm" style="min-width:110px">DÙNG ĐƯỢC</div><span class="arrow-lbl"><code>WHERE user_id=1</code> (cột 1)</span></div>
+          <div class="dg-row" style="justify-content:flex-start"><div class="node green sm" style="min-width:110px">DÙNG ĐƯỢC</div><span class="arrow-lbl"><code>… AND status='active'</code> (cột 1,2)</span></div>
+          <div class="dg-row" style="justify-content:flex-start"><div class="node green sm" style="min-width:110px">DÙNG ĐƯỢC</div><span class="arrow-lbl"><code>… AND created_at &gt; '…'</code> (cả 3)</span></div>
+          <div class="dg-row" style="justify-content:flex-start"><div class="node red sm" style="min-width:110px">KHÔNG DÙNG</div><span class="arrow-lbl"><code>WHERE status='active'</code> (bỏ cột 1)</span></div>
+          <div class="dg-row" style="justify-content:flex-start"><div class="node red sm" style="min-width:110px">KHÔNG DÙNG</div><span class="arrow-lbl"><code>WHERE created_at &gt; '…'</code> (bỏ cột 1,2)</span></div>
+          <div class="dg-row" style="justify-content:flex-start"><div class="node orange sm" style="min-width:110px">MỘT PHẦN</div><span class="arrow-lbl"><code>user_id=1 AND created_at&gt;'…'</code> (chỉ cột 1, cột 3 lọc sau)</span></div>
+        </div>
+        <div class="dg-note">Không tra được từ điển nếu không biết chữ cái đầu → phải có cột trái nhất.</div>
+      </div>
+
+      <h3>Covering Index</h3>
+      <div class="block how">
+        <div class="block-label">Index-Only Scan</div>
+        <p>Nếu index chứa <strong>tất cả cột</strong> mà query cần (SELECT + WHERE), DB đọc dữ liệu thẳng từ index, <strong>không cần truy cập bảng</strong> (index-only scan) → nhanh nhất. Ngược lại phải "index scan + table lookup" cho mỗi row khớp.</p>
+      </div>
+      <table>
+        <tr><th>Node trong EXPLAIN</th><th>Ý nghĩa</th><th>Tốt/xấu</th></tr>
+        <tr><td>Seq Scan</td><td>Quét toàn bảng</td><td>Xấu với bảng lớn</td></tr>
+        <tr><td>Index Scan</td><td>Dùng index + lookup bảng</td><td>Tốt</td></tr>
+        <tr><td>Index Only Scan</td><td>Chỉ đọc index</td><td>Tốt nhất</td></tr>
+        <tr><td>Bitmap Index Scan</td><td>Index → bitmap → bảng</td><td>Tốt khi nhiều row</td></tr>
+      </table>
+    </section>
+
+    <!-- 2. TRANSACTION -->
+    <section id="txn">
+      <h2 class="section-title"><span class="num">2</span> Transaction &amp; Isolation</h2>
+      <p>ACID: <strong>A</strong>tomicity (all-or-nothing), <strong>C</strong>onsistency (valid→valid), <strong>I</strong>solation (không giẫm chân nhau), <strong>D</strong>urability (committed=bền).</p>
+      <table>
+        <tr><th>Isolation Level</th><th>Dirty Read</th><th>Non-repeatable Read</th><th>Phantom Read</th></tr>
+        <tr><td>Read Uncommitted</td><td>có</td><td>có</td><td>có</td></tr>
+        <tr><td>Read Committed <em>(PG default)</em></td><td>không</td><td>có</td><td>có</td></tr>
+        <tr><td>Repeatable Read <em>(MySQL default)</em></td><td>không</td><td>không</td><td>có*</td></tr>
+        <tr><td>Serializable</td><td>không</td><td>không</td><td>không</td></tr>
+      </table>
+      <div class="tbl-cap">*MySQL InnoDB Repeatable Read chặn cả phantom nhờ gap lock.</div>
+      <div class="block how">
+        <div class="block-label">Ba hiện tượng đọc</div>
+        <ul>
+          <li><strong>Dirty Read:</strong> đọc dữ liệu của transaction khác CHƯA commit (có thể bị rollback).</li>
+          <li><strong>Non-repeatable Read:</strong> đọc cùng 1 row hai lần, giá trị khác (row bị update giữa chừng).</li>
+          <li><strong>Phantom Read:</strong> chạy cùng query hai lần, số row khác (row mới được insert).</li>
+        </ul>
+      </div>
+      <div class="block best">
+        <div class="block-label">Chọn isolation level</div>
+        <p>Cao hơn = an toàn hơn nhưng chậm hơn (nhiều lock/abort). Mặc định Read Committed đủ cho hầu hết. Dùng Serializable cho thao tác tài chính nhạy cảm; xử lý được lỗi serialization (retry). Transfer tiền: Repeatable Read + SELECT FOR UPDATE.</p>
+      </div>
+    </section>
+
+    <!-- 3. MVCC -->
+    <section id="mvcc">
+      <h2 class="section-title"><span class="num">3</span> MVCC &amp; Locking</h2>
+      <div class="block why">
+        <div class="block-label">Vấn đề MVCC giải quyết</div>
+        <p>Không có MVCC, reader và writer tranh nhau lock → đọc bị chặn bởi ghi và ngược lại → throughput thấp. MVCC (Multi-Version Concurrency Control) cho phép <strong>reader không chặn writer, writer không chặn reader</strong>.</p>
+      </div>
+      <div class="dg">
+        <div class="dg-title">MVCC: mỗi row nhiều phiên bản, đọc theo snapshot</div>
+        <div class="dg-wrap" style="gap:8px">
+          <div class="dg-row scroll"><div class="node accent sm">T1 bắt đầu<span class="sub">snapshot @ t1</span></div><span class="arrow-lbl">Row X = "A" (version @ t0)</span></div>
+          <div class="dg-row scroll"><div class="node orange sm">T2 UPDATE X="B"</div><div class="arrow-h" style="width:30px"></div><div class="node green sm">tạo version MỚI @ t2<span class="sub">KHÔNG ghi đè bản cũ</span></div></div>
+          <div class="dg-row scroll"><div class="node accent sm">T1 đọc X</div><div class="arrow-h grn" style="width:30px"></div><div class="node green sm">vẫn thấy "A"<span class="sub">snapshot t1 &lt; t2 · không bị chặn</span></div></div>
+          <div class="dg-row scroll"><div class="node orange sm">T2 commit</div><div class="arrow-h" style="width:30px"></div><div class="node accent sm">T1 vẫn thấy "A"<span class="sub">tới khi T1 kết thúc (Repeatable Read)</span></div></div>
+        </div>
+        <div class="dg-note">Version cũ được dọn bởi VACUUM (PostgreSQL) khi không transaction nào còn cần.</div>
+      </div>
+      <h3>Deadlock trong DB</h3>
+      <div class="dg">
+        <div class="dg-row dg-gap-lg top">
+          <div class="dg-group" style="border-color:var(--danger)">
+            <span class="grp-label" style="color:var(--danger)">T1</span>
+            <div class="node green sm">UPDATE row 1<span class="sub">khóa row 1</span></div>
+            <div class="arrow-v red"></div>
+            <div class="node red sm">UPDATE row 2<span class="sub">chờ T2</span></div>
+          </div>
+          <div class="node muted">vòng chờ<br>tròn</div>
+          <div class="dg-group" style="border-color:var(--danger)">
+            <span class="grp-label" style="color:var(--danger)">T2</span>
+            <div class="node green sm">UPDATE row 2<span class="sub">khóa row 2</span></div>
+            <div class="arrow-v red"></div>
+            <div class="node red sm">UPDATE row 1<span class="sub">chờ T1</span></div>
+          </div>
+        </div>
+        <div class="dg-note">DB tự phát hiện (wait-for graph) → abort 1 transaction (victim). Phòng: khóa theo <strong>thứ tự nhất quán</strong> (vd luôn khóa row ID nhỏ trước).</div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Optimistic vs Pessimistic locking</div>
+        <ul>
+          <li><strong>Pessimistic</strong> (<code>SELECT ... FOR UPDATE</code>): khóa row ngay khi đọc. Dùng khi tranh chấp cao.</li>
+          <li><strong>Optimistic</strong> (version column): không khóa, kiểm tra version lúc update; nếu đổi → retry. Dùng khi tranh chấp thấp, throughput cao.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 4. POOL & N+1 -->
+    <section id="pool">
+      <h2 class="section-title"><span class="num">4</span> Connection Pool &amp; N+1 Query</h2>
+      <div class="block why">
+        <div class="block-label">Vì sao cần connection pool</div>
+        <p>Mỗi kết nối DB tốn TCP handshake (~1-3ms) + TLS + auth. Không pool → mỗi query trả giá này. Pool tái dùng connection sẵn có → giảm latency đáng kể.</p>
+      </div>
+      <pre><code>db.<span class="tok-fn">SetMaxOpenConns</span>(<span class="tok-num">25</span>)               <span class="tok-com">// tối đa connection active</span>
+db.<span class="tok-fn">SetMaxIdleConns</span>(<span class="tok-num">10</span>)               <span class="tok-com">// giữ sẵn để tái dùng</span>
+db.<span class="tok-fn">SetConnMaxLifetime</span>(<span class="tok-num">5</span> * time.Minute) <span class="tok-com">// recycle định kỳ</span>
+db.<span class="tok-fn">SetConnMaxIdleTime</span>(<span class="tok-num">1</span> * time.Minute) <span class="tok-com">// đóng idle lâu</span></code></pre>
+      <div class="block pitfall">
+        <div class="block-label">Sizing pool</div>
+        <p>Quá ít → request xếp hàng chờ connection → latency tăng. Quá nhiều → vượt <code>max_connections</code> của DB, tốn RAM/context-switch phía DB → chậm cả hệ thống. Công thức khởi điểm: <code>(CPU cores × 2) + spindles</code>; thực tế 10-25, rồi đo <em>wait duration</em> và <em>active count</em> để tinh chỉnh. Nhớ: nhiều app instance × pool size = tổng connection tới DB.</p>
+      </div>
+      <h3>N+1 Query Problem</h3>
+      <div class="dg">
+        <div class="dg-row dg-gap-lg top">
+          <div class="dg-group" style="border-color:var(--danger)">
+            <span class="grp-label" style="color:var(--danger)">SAI · N+1 query</span>
+            <div class="node accent sm">SELECT * FROM users<span class="sub">1 query</span></div>
+            <div class="arrow-v red"></div>
+            <div class="node red sm">mỗi user: SELECT orders WHERE user_id=?<span class="sub">N query</span></div>
+            <div class="node red">100 user = 101 query!</div>
+          </div>
+          <div class="dg-group" style="border-color:var(--accent-2)">
+            <span class="grp-label" style="color:var(--accent-2)">ĐÚNG · JOIN / batch</span>
+            <div class="node green sm">JOIN users + orders<span class="sub">1 query</span></div>
+            <div class="node muted sm">— hoặc —</div>
+            <div class="node green sm">SELECT orders WHERE user_id IN (…)<span class="sub">1 batch query</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Khắc phục N+1</div>
+        <p>JOIN, batch với <code>IN (...)</code>, hoặc DataLoader pattern (gom key rồi query 1 lần). ORM thường ẩn N+1 — bật query logging để phát hiện. Đây là nguyên nhân latency phổ biến nhất khi API chậm.</p>
+      </div>
+    </section>
+
+    <!-- 5. REDIS -->
+    <section id="redis">
+      <h2 class="section-title"><span class="num">5</span> Redis Data Structures</h2>
+      <table>
+        <tr><th>Type</th><th>Use case điển hình</th><th>Độ phức tạp</th></tr>
+        <tr><td>String</td><td>Cache, counter (INCR), session, distributed lock</td><td>O(1)</td></tr>
+        <tr><td>Hash</td><td>Lưu object (field-value)</td><td>O(1)/field</td></tr>
+        <tr><td>List</td><td>Queue, timeline gần đây</td><td>O(1) push/pop</td></tr>
+        <tr><td>Set</td><td>Tag, phần tử duy nhất, intersection</td><td>O(1) add/check</td></tr>
+        <tr><td>Sorted Set (ZSet)</td><td>Leaderboard, rate limit sliding window, scheduling</td><td>O(log n)</td></tr>
+        <tr><td>Stream</td><td>Event log, message queue nhẹ</td><td>O(1) append</td></tr>
+      </table>
+      <div class="block how">
+        <div class="block-label">Vì sao Redis nhanh dù single-threaded</div>
+        <p>Redis xử lý command trên <strong>một luồng chính</strong> (đến 6.x) → không cần lock, không race, mọi command atomic. Nhanh nhờ: toàn bộ dữ liệu trong RAM, cấu trúc dữ liệu tối ưu, I/O multiplexing (epoll). Đơn luồng cũng là lý do <strong>command O(n) nặng</strong> (vd <code>KEYS *</code>) chặn cả server — tránh trong production.</p>
+      </div>
+      <div class="block best">
+        <div class="block-label">Redis vs Memcached</div>
+        <p>Redis: cấu trúc dữ liệu phong phú, persistence (RDB/AOF), pub/sub, cluster native. Memcached: chỉ string, đa luồng, tiết kiệm bộ nhớ hơn cho pure cache. Chọn Redis khi cần hơn cache đơn thuần.</p>
+      </div>
+    </section>
+
+    <!-- 6. CACHE STRATEGIES -->
+    <section id="cache">
+      <h2 class="section-title"><span class="num">6</span> Cache Strategies</h2>
+      <div class="dg">
+        <div class="dg-title">Cache-Aside (Lazy Loading) — phổ biến nhất</div>
+        <div class="dg-group" style="border-color:var(--accent-2);margin-bottom:14px">
+          <span class="grp-label" style="color:var(--accent-2)">READ</span>
+          <div class="dg-row scroll">
+            <div class="node green sm">app</div>
+            <div class="arrow-h" style="width:24px"></div>
+            <div class="node accent sm">cache?</div>
+            <div class="arrow-h grn" style="width:24px"></div><span class="arrow-lbl">hit</span>
+            <div class="node green sm">trả về</div>
+          </div>
+          <div class="dg-row scroll">
+            <span class="arrow-lbl">miss →</span>
+            <div class="node orange sm">query DB</div>
+            <div class="arrow-h" style="width:24px"></div>
+            <div class="node accent sm">ghi cache</div>
+            <div class="arrow-h grn" style="width:24px"></div>
+            <div class="node green sm">trả về</div>
+          </div>
+        </div>
+        <div class="dg-group" style="border-color:var(--accent-3)">
+          <span class="grp-label" style="color:var(--accent-3)">WRITE</span>
+          <div class="dg-row scroll">
+            <div class="node green sm">app</div>
+            <div class="arrow-h" style="width:24px"></div>
+            <div class="node orange sm">update DB</div>
+            <div class="arrow-h red" style="width:24px"></div>
+            <div class="node red sm">INVALIDATE cache<span class="sub">xóa key, KHÔNG update</span></div>
+          </div>
+          <span class="sub" style="font-size:11px;color:var(--text-dim)">lần đọc kế tiếp nạp lại từ DB</span>
+        </div>
+      </div>
+      <table>
+        <tr><th>Strategy</th><th>Cơ chế</th><th>Đánh đổi</th></tr>
+        <tr><td>Cache-Aside</td><td>App quản lý cache; read miss→DB; write→invalidate</td><td>Đơn giản, phổ biến; có thể stale ngắn</td></tr>
+        <tr><td>Read-Through</td><td>Cache tự nạp từ DB khi miss</td><td>App đơn giản; cần cache library hỗ trợ</td></tr>
+        <tr><td>Write-Through</td><td>Ghi cache + DB đồng bộ</td><td>Cache luôn mới; write chậm hơn</td></tr>
+        <tr><td>Write-Behind</td><td>Ghi cache, async flush DB</td><td>Write nhanh; nguy cơ mất dữ liệu nếu crash</td></tr>
+      </table>
+      <div class="block pitfall">
+        <div class="block-label">Vì sao write invalidate chứ không update cache?</div>
+        <p>Update cache khi write dễ gây <strong>race</strong>: hai write đồng thời ghi cache theo thứ tự khác DB → cache sai vĩnh viễn. Invalidate (xóa) an toàn hơn: lần đọc sau nạp lại giá trị đúng nhất từ DB.</p>
+      </div>
+    </section>
+
+    <!-- 7. CACHE PROBLEMS -->
+    <section id="cacheproblems">
+      <h2 class="section-title"><span class="num">7</span> Cache Problems</h2>
+      <div class="dg">
+        <div class="dg-title">Ba vấn đề cache kinh điển</div>
+        <div class="dg-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+          <div class="dg-group" style="border-color:var(--danger)">
+            <span class="grp-label" style="color:var(--danger)">1 · Stampede</span>
+            <div class="dg-row"><div class="cells"><span class="cell hot sm">k</span></div><span class="arrow-lbl">hết hạn</span></div>
+            <div class="node red sm">1000 request cùng miss → dồn DB</div>
+          </div>
+          <div class="dg-group" style="border-color:var(--danger)">
+            <span class="grp-label" style="color:var(--danger)">2 · Penetration</span>
+            <div class="node muted sm">key KHÔNG có trong DB</div>
+            <div class="node red sm">luôn miss cache → luôn hit DB</div>
+          </div>
+          <div class="dg-group" style="border-color:var(--danger)">
+            <span class="grp-label" style="color:var(--danger)">3 · Avalanche</span>
+            <div class="cells"><span class="cell hot sm">k</span><span class="cell hot sm">k</span><span class="cell hot sm">k</span></div>
+            <div class="node red sm">nhiều key hết hạn cùng lúc → spike DB</div>
+          </div>
+        </div>
+      </div>
+      <table>
+        <tr><th>Vấn đề</th><th>Nguyên nhân</th><th>Cách xử lý</th></tr>
+        <tr><td>Stampede</td><td>Hot key hết hạn, nhiều request cùng miss</td><td>Singleflight (1 request nạp, còn lại chờ), refresh sớm, never-expire + background refresh</td></tr>
+        <tr><td>Penetration</td><td>Query key không có trong DB</td><td>Cache null value (TTL ngắn), bloom filter</td></tr>
+        <tr><td>Avalanche</td><td>Nhiều key hết hạn đồng thời</td><td>TTL + jitter ngẫu nhiên, không hết hạn hot key</td></tr>
+        <tr><td>Hot key</td><td>1 key nhận traffic cực lớn</td><td>Local cache (in-process), sharding key, read replica</td></tr>
+      </table>
+      <div class="block how">
+        <div class="block-label">Singleflight — chống stampede</div>
+        <p>Khi nhiều goroutine cùng miss một key, chỉ <strong>một</strong> goroutine thực sự query DB; các goroutine khác <strong>chờ và dùng chung kết quả</strong>. Go có package <code>golang.org/x/sync/singleflight</code>. Đây là câu trả lời chuẩn cho câu hỏi cache stampede.</p>
+      </div>
+      <div class="block how">
+        <div class="block-label">Distributed lock (Redis)</div>
+        <pre><code>SET lock_key uniqueVal NX PX <span class="tok-num">30000</span>
+<span class="tok-com">// NX = chỉ set nếu chưa tồn tại (acquire)</span>
+<span class="tok-com">// PX = tự hết hạn 30s (tránh deadlock nếu holder crash)</span>
+<span class="tok-com">// uniqueVal = chỉ holder mới release đúng (kiểm bằng Lua script)</span></code></pre>
+        <p>Lưu ý: distributed lock có điểm yếu (clock skew, GC pause khiến lock hết hạn sớm). Với yêu cầu chặt cần <em>fencing token</em>.</p>
+      </div>
+    </section>
+
+    <!-- 8. KAFKA -->
+    <section id="kafka">
+      <h2 class="section-title"><span class="num">8</span> Kafka &amp; Delivery Semantics</h2>
+      <div class="dg">
+        <div class="dg-row scroll top">
+          <div class="node green">Producer</div>
+          <div class="arrow-h" style="width:30px"></div>
+          <div class="dg-group">
+            <span class="grp-label">Topic "orders" — 4 partition</span>
+            <div class="dg-col" style="align-items:flex-start;gap:6px">
+              <div class="dg-row"><span class="arrow-lbl" style="min-width:28px">P0</span><div class="cells"><span class="cell fill sm">m0</span><span class="cell fill sm">m1</span><span class="cell fill sm">m2</span></div></div>
+              <div class="dg-row"><span class="arrow-lbl" style="min-width:28px">P1</span><div class="cells"><span class="cell fill sm">m0</span><span class="cell fill sm">m1</span></div></div>
+              <div class="dg-row"><span class="arrow-lbl" style="min-width:28px">P2</span><div class="cells"><span class="cell fill sm">m0</span><span class="cell fill sm">m1</span></div></div>
+              <div class="dg-row"><span class="arrow-lbl" style="min-width:28px">P3</span><div class="cells"><span class="cell fill sm">m0</span></div></div>
+            </div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)">có thứ tự TRONG mỗi partition</span>
+          </div>
+          <div class="arrow-h" style="width:30px"></div>
+          <div class="dg-group">
+            <span class="grp-label">Consumer Group "svc"</span>
+            <div class="node accent sm">Consumer A → P0, P1</div>
+            <div class="node accent sm">Consumer B → P2, P3</div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)">mỗi partition chỉ 1 consumer/group</span>
+          </div>
+        </div>
+        <div class="dg-note">Consumer B chết → <strong>rebalance</strong> → A nhận cả 4 partition. Ordering: cùng key → cùng partition → có thứ tự; khác key → song song, không đảm bảo thứ tự tổng.</div>
+      </div>
+      <table>
+        <tr><th>Delivery</th><th>Producer</th><th>Consumer</th><th>Kết quả</th></tr>
+        <tr><td>At-most-once</td><td>acks=0, không retry</td><td>commit offset TRƯỚC khi xử lý</td><td>có thể mất, không trùng</td></tr>
+        <tr><td>At-least-once</td><td>acks=all, retry</td><td>commit offset SAU khi xử lý</td><td>không mất, có thể trùng</td></tr>
+        <tr><td>Exactly-once</td><td>idempotent/transactional</td><td>transactional / idempotent consumer</td><td>không mất, không trùng</td></tr>
+      </table>
+      <div class="block best">
+        <div class="block-label">Thực dụng: at-least-once + idempotent consumer</div>
+        <p>Exactly-once thật sự phức tạp và tốn kém. Cách phổ biến trong thực tế: <strong>at-least-once + consumer idempotent</strong> (lưu message ID đã xử lý, skip trùng). Đạt hiệu ứng exactly-once về mặt nghiệp vụ mà đơn giản hơn nhiều.</p>
+      </div>
+      <div class="dg">
+        <div class="dg-title">DLQ (Dead Letter Queue) pattern</div>
+        <div class="dg-row scroll top">
+          <div class="node accent">Main Topic</div>
+          <div class="arrow-h" style="width:30px"></div>
+          <div class="node accent">Consumer</div>
+          <div class="arrow-h" style="width:30px"></div>
+          <div class="dg-col">
+            <div class="dg-row"><span class="arrow-lbl" style="color:var(--accent-2)">thành công →</span><div class="node green sm">commit offset</div></div>
+            <div class="dg-row"><span class="arrow-lbl" style="color:var(--accent-3)">thất bại →</span><div class="node orange sm">retry N lần</div></div>
+            <div class="dg-row"><span class="arrow-lbl" style="color:var(--danger)">vẫn lỗi →</span><div class="node red sm">DLQ Topic</div><div class="arrow-h" style="width:20px"></div><div class="node muted sm">alert + replay thủ công</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="block how">
+        <div class="block-label">Consumer group rebalancing — vấn đề</div>
+        <p>Khi consumer join/leave, partition được phân bổ lại. Trong lúc rebalance, các consumer <strong>tạm dừng</strong> → downtime. Rebalance thường xuyên (do heartbeat timeout, xử lý chậm) gây gián đoạn. Fix: cấu hình heartbeat/session timeout hợp lý, dùng cooperative/sticky assignor để giảm xáo trộn.</p>
+      </div>
+    </section>
+
+    <!-- FLASHCARDS -->
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao DB dùng B-Tree, không phải binary tree hay hash?</span><span class="icon">+</span></div>
+        <div class="a"><p>B-Tree branching factor lớn (mỗi node = 1 page nhiều key) → cây nông → ít disk I/O. Binary tree quá sâu → nhiều disk read. Hash O(1) equality nhưng không làm được range query; B-Tree sorted + leaf liên kết hỗ trợ range và ORDER BY.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Leftmost prefix rule của composite index?</span><span class="icon">+</span></div>
+        <div class="a"><p>Index (A,B,C) dùng được cho WHERE bắt đầu từ A: A / A,B / A,B,C. KHÔNG dùng được nếu bỏ A (chỉ B, hoặc chỉ C). Vì index sorted theo (A,B,C) như từ điển — cần biết cột đầu.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Covering index / index-only scan?</span><span class="icon">+</span></div>
+        <div class="a"><p>Index chứa tất cả cột query cần (SELECT+WHERE) → đọc thẳng từ index, không truy cập bảng → nhanh nhất. Ngược lại phải index scan + table lookup mỗi row.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>MVCC hoạt động thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Mỗi row có nhiều version. Transaction đọc theo snapshot → thấy version phù hợp thời điểm bắt đầu. Writer tạo version mới, không ghi đè → reader không chặn writer và ngược lại. Version cũ dọn bởi VACUUM (PG).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Dirty / Non-repeatable / Phantom read?</span><span class="icon">+</span></div>
+        <div class="a"><p>Dirty: đọc data chưa commit. Non-repeatable: đọc cùng row 2 lần giá trị khác (bị update). Phantom: cùng query 2 lần số row khác (bị insert). Read Committed chặn dirty; Repeatable Read chặn non-repeatable; Serializable chặn hết.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Connection pool: quá ít vs quá nhiều?</span><span class="icon">+</span></div>
+        <div class="a"><p>Quá ít → request xếp hàng chờ connection → latency. Quá nhiều → vượt max_connections DB, tốn RAM/context-switch phía DB → chậm cả hệ thống. Nhớ: nhiều app instance × pool = tổng connection tới DB.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>N+1 query và cách fix?</span><span class="icon">+</span></div>
+        <div class="a"><p>1 query list + N query con (mỗi item 1 query) → 100 item = 101 query. Fix: JOIN, batch IN(...), hoặc DataLoader. ORM thường ẩn N+1 — bật query log để phát hiện. Nguyên nhân latency phổ biến nhất.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao write invalidate cache thay vì update?</span><span class="icon">+</span></div>
+        <div class="a"><p>Update cache khi write dễ race: 2 write đồng thời ghi cache khác thứ tự DB → cache sai vĩnh viễn. Invalidate (xóa) an toàn hơn: lần đọc sau nạp giá trị mới nhất từ DB.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Cache stampede và cách xử lý?</span><span class="icon">+</span></div>
+        <div class="a"><p>Hot key hết hạn → nhiều request cùng miss → dồn vào DB → quá tải. Xử lý: singleflight (1 request nạp, còn lại chờ dùng chung kết quả), refresh sớm trước khi hết hạn, hoặc never-expire + background refresh.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Cache penetration vs avalanche?</span><span class="icon">+</span></div>
+        <div class="a"><p>Penetration: query key không tồn tại trong DB → luôn miss → bào mòn DB. Fix: cache null value (TTL ngắn), bloom filter. Avalanche: nhiều key hết hạn cùng lúc → spike DB. Fix: TTL + jitter ngẫu nhiên.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Kafka ordering guarantee?</span><span class="icon">+</span></div>
+        <div class="a"><p>Chỉ đảm bảo thứ tự TRONG một partition. Cùng key → cùng partition → có thứ tự. Khác key → khác partition → song song, không đảm bảo thứ tự tổng. Muốn order theo entity → dùng entity ID làm key.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>At-least-once vs exactly-once? Cách thực dụng?</span><span class="icon">+</span></div>
+        <div class="a"><p>At-least-once: commit offset SAU xử lý → không mất, có thể trùng. Exactly-once: phức tạp/tốn kém. Thực dụng: at-least-once + consumer idempotent (lưu message ID, skip trùng) → hiệu ứng exactly-once về nghiệp vụ mà đơn giản.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao Redis nhanh dù single-threaded? Hệ quả?</span><span class="icon">+</span></div>
+        <div class="a"><p>Một luồng → không lock, mọi command atomic. Nhanh nhờ in-memory + cấu trúc tối ưu + epoll. Hệ quả: command O(n) nặng (KEYS *) chặn cả server → tránh trong production, dùng SCAN thay thế.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="week4.html"><span class="dir">← Trước</span><span class="title">Week 4 · Backend</span></a>
+      <a href="week6.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 6 · Distributed</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

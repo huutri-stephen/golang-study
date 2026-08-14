@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 8 – Mock Interview + Revision | Senior Go Interview</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Go Interview</div></a>
+      <div class="sub">Senior Backend Prep · Deep Dive</div>
+    </div>
+    <h2>Week 8 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview</a>
+      <a href="#mock1">1. Mock: Go Internals</a>
+      <a href="#mock2">2. Mock: Backend</a>
+      <a href="#mock3">3. Mock: System Design</a>
+      <a href="#mock4">4. Troubleshooting</a>
+      <a href="#patterns">5. Answer Patterns</a>
+      <a href="#behavioral">6. Behavioral</a>
+      <a href="#review">7. Final Review</a>
+      <a href="#flashcards">Rapid-fire Q&amp;A</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html">Week 1 · Go Core</a>
+      <a href="week2.html">Week 2 · Concurrency</a>
+      <a href="week3.html">Week 3 · Runtime</a>
+      <a href="week4.html">Week 4 · Backend</a>
+      <a href="week5.html">Week 5 · DB/Redis/MQ</a>
+      <a href="week6.html">Week 6 · Distributed</a>
+      <a href="week7.html">Week 7 · System Design</a>
+      <a href="week8.html" class="active">Week 8 · Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 8 · Revision</span>
+      <h1>Mock Interview + Final Review</h1>
+      <p>Tổng duyệt: 4 mock session, khung trả lời, câu hỏi behavioral, quy trình troubleshooting production, và checklist cuối cùng.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★★</b><span>Priority</span></div>
+        <div class="item"><b>4</b><span>Mock sessions</span></div>
+        <div class="item"><b>~15h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview</h2>
+      <p>Tuần cuối không học kiến thức mới mà <strong>luyện diễn đạt</strong>: trả lời không cần notes, cấu trúc câu trả lời, và tư duy trade-off. Mỗi ngày làm 1 mock + review điểm yếu.</p>
+      <div class="tldr">
+        <div class="label">Lịch mock 4 buổi</div>
+        <ul>
+          <li><strong>Mock 1 — Go internals</strong> (60 phút): slice/map/interface, GMP, channel, GC, escape.</li>
+          <li><strong>Mock 2 — Backend</strong> (60 phút): HTTP, DB, Redis, Kafka, context, graceful shutdown.</li>
+          <li><strong>Mock 3 — System design</strong> (45 phút): theo framework 8 bước.</li>
+          <li><strong>Mock 4 — Production troubleshooting</strong> (30 phút): latency spike, memory leak.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- MOCK 1 -->
+    <section id="mock1">
+      <h2 class="section-title"><span class="num">1</span> Mock 1 — Go Internals (60')</h2>
+      <div class="dg">
+        <div class="dg-title">Cấu trúc buổi</div>
+        <div class="dg-row scroll">
+          <div class="node accent">Quick fire (15')<span class="sub">slice, map, interface, defer, nil trap</span></div>
+          <div class="arrow-h" style="width:24px"></div>
+          <div class="node accent">Concurrency (20')<span class="sub">GMP, channel, leak, worker pool</span></div>
+          <div class="arrow-h" style="width:24px"></div>
+          <div class="node accent">Runtime (15')<span class="sub">escape, GC, STW, pprof</span></div>
+          <div class="arrow-h" style="width:24px"></div>
+          <div class="node green">Coding (10')<span class="sub">rate limiter, fix race, timeout</span></div>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Coding thường gặp</div>
+        <ul>
+          <li>Implement rate limiter bằng channel (token bucket).</li>
+          <li>Fix data race trong đoạn code cho sẵn (mutex/atomic/channel).</li>
+          <li>Thêm timeout cho operation bằng context + select.</li>
+          <li>Concurrent-safe cache có TTL.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- MOCK 2 -->
+    <section id="mock2">
+      <h2 class="section-title"><span class="num">2</span> Mock 2 — Backend Engineering (60')</h2>
+      <div class="block best">
+        <div class="block-label">Chủ đề &amp; câu hỏi tình huống</div>
+        <ul>
+          <li>Cấu hình HTTP client production (timeout, pool). Vì sao phải close body?</li>
+          <li>Middleware giới hạn concurrent request.</li>
+          <li>Graceful shutdown trong Kubernetes.</li>
+          <li>"Service trả 504 lúc có lúc không — debug thế nào?"</li>
+          <li>Transaction pattern, isolation level cho transfer tiền.</li>
+          <li>Cache stampede — xử lý bằng singleflight.</li>
+          <li>Kafka delivery semantics, idempotent consumer.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- MOCK 3 -->
+    <section id="mock3">
+      <h2 class="section-title"><span class="num">3</span> Mock 3 — System Design (45')</h2>
+      <div class="dg">
+        <div class="dg-title">Phân bổ thời gian</div>
+        <div class="dg-row scroll">
+          <div class="node accent sm">0-5' Requirements</div>
+          <div class="arrow-h" style="width:16px"></div>
+          <div class="node accent sm">5-8' Scale</div>
+          <div class="arrow-h" style="width:16px"></div>
+          <div class="node accent sm">8-15' API + Data</div>
+          <div class="arrow-h" style="width:16px"></div>
+          <div class="node purple sm">15-30' Architecture + Deep dive</div>
+          <div class="arrow-h" style="width:16px"></div>
+          <div class="node green sm">30-45' Scale + Failure + Observability</div>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Đề mẫu</div>
+        <p>"Design payment system 10K TPS", "Design real-time chat", "Design notification system", "Design URL shortener at scale". Luôn nói to trade-off và giả định. Vẽ box + arrow, đừng sa vào schema quá sớm.</p>
+      </div>
+    </section>
+
+    <!-- MOCK 4 -->
+    <section id="mock4">
+      <h2 class="section-title"><span class="num">4</span> Mock 4 — Production Troubleshooting (30')</h2>
+      <div class="dg">
+        <div class="dg-title">Quy trình debug có phương pháp (không đoán mò)</div>
+        <div class="dg-wrap">
+          <div class="node accent wide" style="text-align:left">1 · Hiểu triệu chứng<span class="sub">cái gì đổi? khi nào? phạm vi?</span></div>
+          <div class="arrow-v"></div>
+          <div class="node accent wide" style="text-align:left">2 · Metrics<span class="sub">latency, error rate, throughput — đột ngột hay dần?</span></div>
+          <div class="arrow-v"></div>
+          <div class="node accent wide" style="text-align:left">3 · Correlate<span class="sub">deploy? traffic spike? config change?</span></div>
+          <div class="arrow-v"></div>
+          <div class="node accent wide" style="text-align:left">4 · Tracing → khoanh vùng<span class="sub">service/endpoint nào chậm?</span></div>
+          <div class="arrow-v"></div>
+          <div class="node purple wide" style="text-align:left">5 · Profile / Query plan<span class="sub">CPU? Mem? Lock? Slow query?</span></div>
+          <div class="arrow-v"></div>
+          <div class="node green wide" style="text-align:left">6 · Root cause → Fix → Verify → Post-mortem</div>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="col">
+          <h4>Latency spike (100ms → 3s)</h4>
+          <ul style="margin-left:18px">
+            <li>DB lock contention / slow query</li>
+            <li>GC pressure (heap tăng)</li>
+            <li>Connection pool exhaustion</li>
+            <li>Downstream degradation</li>
+            <li>DNS timeout</li>
+          </ul>
+        </div>
+        <div class="col">
+          <h4>Memory leak (OOM sau 12h)</h4>
+          <ul style="margin-left:18px">
+            <li>Goroutine leak (channel/context)</li>
+            <li>Unbounded cache</li>
+            <li>Unclosed response body</li>
+            <li>time.Ticker không Stop</li>
+            <li>Slice giữ ref array lớn</li>
+          </ul>
+        </div>
+      </div>
+      <div class="block how">
+        <div class="block-label">Memory leak — dùng pprof diff</div>
+        <pre><code>curl .../debug/pprof/heap &gt; h1.prof
+<span class="tok-com"># chờ 10 phút</span>
+curl .../debug/pprof/heap &gt; h2.prof
+go tool pprof -diff_base=h1.prof h2.prof   <span class="tok-com"># xem object nào tăng</span></code></pre>
+      </div>
+    </section>
+
+    <!-- ANSWER PATTERNS -->
+    <section id="patterns">
+      <h2 class="section-title"><span class="num">5</span> Answer Patterns</h2>
+      <div class="dg">
+        <div class="dg-row dg-gap-lg top">
+          <div class="dg-group">
+            <span class="grp-label">Giải thích kỹ thuật</span>
+            <div class="node accent sm">What</div>
+            <div class="arrow-v"></div>
+            <div class="node accent sm">How</div>
+            <div class="arrow-v"></div>
+            <div class="node accent sm">Why</div>
+            <div class="arrow-v"></div>
+            <div class="node green sm">Trade-offs</div>
+            <div class="arrow-v"></div>
+            <div class="node green sm">When to use</div>
+          </div>
+          <div class="dg-group">
+            <span class="grp-label">Giải quyết vấn đề</span>
+            <div class="node accent sm">Understand</div>
+            <div class="arrow-v"></div>
+            <div class="node accent sm">Scope</div>
+            <div class="arrow-v"></div>
+            <div class="node accent sm">Options</div>
+            <div class="arrow-v"></div>
+            <div class="node green sm">Trade-offs</div>
+            <div class="arrow-v"></div>
+            <div class="node green sm">Decision</div>
+          </div>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Ví dụ áp dụng: "escape analysis là gì?"</div>
+        <p><strong>What:</strong> compiler quyết định stack/heap tại compile-time. <strong>How:</strong> phân tích địa chỉ biến có thoát scope hàm không. <strong>Why:</strong> stack rẻ (không GC). <strong>Trade-off:</strong> pointer cho struct lớn buộc heap nhưng tránh copy. <strong>When:</strong> check <code>-gcflags="-m"</code>, chỉ tối ưu hot path.</p>
+      </div>
+    </section>
+
+    <!-- BEHAVIORAL -->
+    <section id="behavioral">
+      <h2 class="section-title"><span class="num">6</span> Behavioral (Senior)</h2>
+      <div class="dg">
+        <div class="dg-title">STAR framework cho mỗi câu chuyện</div>
+        <div class="dg-row scroll">
+          <div class="node accent">S · Situation<span class="sub">bối cảnh, quy mô</span></div>
+          <div class="arrow-h" style="width:24px"></div>
+          <div class="node accent">T · Task<span class="sub">vấn đề, impact</span></div>
+          <div class="arrow-h" style="width:24px"></div>
+          <div class="node purple">A · Action<span class="sub">BẠN làm gì (cụ thể)</span></div>
+          <div class="arrow-h" style="width:24px"></div>
+          <div class="node green">R · Result<span class="sub">kết quả + bài học</span></div>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Câu hỏi hay gặp</div>
+        <ul>
+          <li>"Kể về một sự cố production khó." → STAR, nhấn vào đóng góp cá nhân + bài học.</li>
+          <li>"Cách bạn ra quyết định kỹ thuật?" → hiểu yêu cầu → options → trade-off → document → team input → sẵn sàng revisit.</li>
+          <li>"Mentor junior thế nào?" → code review có giải thích, pair programming, chia sẻ context, tạo cơ hội học.</li>
+        </ul>
+      </div>
+      <div class="block how">
+        <div class="block-label">Senior khác mid-level ở đâu</div>
+        <p>Scope (nghĩ vượt ra ngoài ticket), trade-off (giải thích được lựa chọn), failure thinking (thiết kế cho lúc lỗi), communication (giải thích cho nhiều đối tượng), ownership (dẫn dắt quyết định, chủ trì post-mortem), pragmatism (ship giải pháp hoạt động, không cầu toàn).</p>
+      </div>
+    </section>
+
+    <!-- FINAL REVIEW -->
+    <section id="review">
+      <h2 class="section-title"><span class="num">7</span> Final Review Checklist</h2>
+      <p>Phải giải thích được <strong>không cần notes</strong>:</p>
+      <div class="dg">
+        <div class="dg-row dg-gap-lg top">
+          <div class="dg-group">
+            <span class="grp-label">Go &amp; Runtime</span>
+            <div class="node accent sm">GMP scheduler</div>
+            <div class="node accent sm">Channel internals</div>
+            <div class="node accent sm">Escape analysis</div>
+            <div class="node accent sm">Tri-color GC + write barrier</div>
+            <div class="node accent sm">Nil interface trap</div>
+          </div>
+          <div class="dg-group">
+            <span class="grp-label">Backend</span>
+            <div class="node green sm">HTTP connection pooling</div>
+            <div class="node green sm">Graceful shutdown</div>
+            <div class="node green sm">Context propagation</div>
+            <div class="node green sm">Index + isolation</div>
+            <div class="node green sm">Cache strategies + problems</div>
+          </div>
+          <div class="dg-group">
+            <span class="grp-label">Distributed</span>
+            <div class="node purple sm">CAP trade-offs</div>
+            <div class="node purple sm">Saga / Outbox</div>
+            <div class="node purple sm">Idempotency</div>
+            <div class="node purple sm">Circuit breaker</div>
+            <div class="node purple sm">System design framework</div>
+          </div>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Mindset ngày phỏng vấn</div>
+        <p>Interview senior không phải "biết đáp án" mà là <strong>"reason về trade-off và ra quyết định kỹ thuật tốt"</strong>. Nói to suy nghĩ, hỏi lại khi mơ hồ, thừa nhận điều chưa biết, và luôn gắn quyết định với lý do + đánh đổi.</p>
+      </div>
+    </section>
+
+    <!-- FLASHCARDS -->
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Rapid-fire Q&amp;A</h2>
+      <p>Trả lời trong 30 giây, không notes.</p>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Giải thích slice internals trong 30 giây.</span><span class="icon">+</span></div>
+        <div class="a"><p>Struct 3 field: ptr, len, cap. Append trong cap ghi tại chỗ; hết cap thì cấp array mới (double &lt;256, +25% lớn hơn). Sub-slice chia sẻ backing → aliasing trap; dùng <code>a[l:h:h]</code> để chặn.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>GMP trong một câu.</span><span class="icon">+</span></div>
+        <div class="a"><p>G (goroutine) chạy trên M (OS thread) được điều phối bởi P (logical CPU = GOMAXPROCS); mỗi P có local run queue, work stealing cân bằng tải, syscall block thì P nhảy sang M khác.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Nil interface trap.</span><span class="icon">+</span></div>
+        <div class="a"><p>Interface = (type, data), chỉ nil khi cả hai nil. Trả *MyError nil qua error → type non-nil → interface KHÁC nil. Fix: return nil trực tiếp.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao STW của Go ngắn?</span><span class="icon">+</span></div>
+        <div class="a"><p>Marking concurrent (chạy cùng chương trình), STW chỉ ở mark setup + termination (~10-100µs). Write barrier đảm bảo đúng đắn khi mark song song. Từ 1.14 preemption bất đồng bộ giúp STW ổn định sub-ms.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Cấu hình HTTP client production?</span><span class="icon">+</span></div>
+        <div class="a"><p>Client.Timeout tổng + Transport (MaxIdleConnsPerHost, MaxConnsPerHost, IdleConnTimeout, TLSHandshakeTimeout). LUÔN defer resp.Body.Close() + đọc hết body để tái dùng connection. Không dùng DefaultClient.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>CAP một câu.</span><span class="icon">+</span></div>
+        <div class="a"><p>Khi network partition (bắt buộc trong hệ phân tán), chọn CP (từ chối để giữ nhất quán) hay AP (trả data cũ để giữ khả dụng). CA chỉ có ở hệ một node.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Chống double charge?</span><span class="icon">+</span></div>
+        <div class="a"><p>Idempotency key: check store → completed trả cached, chưa có thì lock + xử lý + lưu. Consumer idempotent: lưu message ID trong cùng transaction với business logic, skip trùng.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Circuit breaker 3 trạng thái?</span><span class="icon">+</span></div>
+        <div class="a"><p>Closed (đếm lỗi, vượt ngưỡng → Open) → Open (fail nhanh, sau timeout → Half-Open) → Half-Open (thử 1 request: OK → Closed, lỗi → Open). Chặn cascading failure.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Debug latency spike production?</span><span class="icon">+</span></div>
+        <div class="a"><p>Metrics (khi nào, đột ngột/dần) → correlate deploy/traffic → tracing khoanh service → profile (CPU/mem/lock) → DB (pool, slow query, lock) → network. Root cause → fix → verify → post-mortem.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Senior khác mid-level?</span><span class="icon">+</span></div>
+        <div class="a"><p>Scope rộng hơn ticket, giải thích trade-off, thiết kế cho failure, communication đa đối tượng, ownership (dẫn dắt + post-mortem), pragmatism (ship giải pháp hoạt động). Không chỉ "biết đáp án".</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Khung trả lời câu hỏi kỹ thuật?</span><span class="icon">+</span></div>
+        <div class="a"><p>What → How → Why → Trade-offs → When to use/not use. Với problem solving: Understand → Scope → Options → Trade-offs → Decision.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="week7.html"><span class="dir">← Trước</span><span class="title">Week 7 · System Design</span></a>
+      <a href="index.html" class="next"><span class="dir">Hoàn thành →</span><span class="title">Về trang chủ</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 3 – Runtime + Performance (Deep Dive) | Senior Go Interview</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Golang knowledge</div></a>
+      <div class="sub">Deep Dive</div>
+    </div>
+    <h2>Week 3 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#allocator">1. Memory Allocator</a>
+      <a href="#escape">2. Escape Analysis</a>
+      <a href="#gc">3. Garbage Collector</a>
+      <a href="#gctuning">4. GC Tuning</a>
+      <a href="#pprof">5. Profiling (pprof)</a>
+      <a href="#benchmark">6. Benchmarking</a>
+      <a href="#workflow">7. Optimization Workflow</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html">Week 1 · Go Core</a>
+      <a href="week2.html">Week 2 · Concurrency</a>
+      <a href="week3.html" class="active">Week 3 · Runtime</a>
+      <a href="week4.html">Week 4 · Backend</a>
+      <a href="week5.html">Week 5 · DB/Redis/MQ</a>
+      <a href="week6.html">Week 6 · Distributed</a>
+      <a href="week7.html">Week 7 · System Design</a>
+      <a href="week8.html">Week 8 · Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 3 · Deep Dive</span>
+      <h1>Runtime + Performance</h1>
+      <p>Cách Go cấp phát bộ nhớ, thu gom rác concurrent với STW cực ngắn, và cách đo lường/tối ưu bằng pprof + benchmark. Đây là phần phân biệt senior thật sự.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★★</b><span>Priority</span></div>
+        <div class="item"><b>7</b><span>Chủ đề sâu</span></div>
+        <div class="item"><b>~12h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <p>Go đánh đổi một chút throughput để lấy <strong>độ trễ GC cực thấp</strong> (sub-millisecond STW) — phù hợp dịch vụ backend cần đuôi latency ổn định. Muốn tối ưu đúng: đo trước (pprof/benchmark), tìm hot path, rồi mới sửa.</p>
+      <div class="tldr">
+        <div class="label">TL;DR</div>
+        <ul>
+          <li>Allocator theo tầng: <strong>mcache (per-P, không lock) → mcentral → mheap</strong>, chia object theo size class.</li>
+          <li>Object nhỏ (&lt;32KB) đi qua size class; lớn cấp trực tiếp từ mheap.</li>
+          <li>Escape analysis quyết định stack/heap tại compile-time; kiểm tra <code>-gcflags="-m"</code>.</li>
+          <li>GC: <strong>concurrent tri-color mark &amp; sweep</strong>, chỉ 2 STW ngắn (~10–100µs).</li>
+          <li><strong>Write barrier</strong> đảm bảo đúng đắn khi mark song song với chương trình.</li>
+          <li><code>GOGC</code> (mặc định 100) điều khiển tần suất GC; Go 1.19+ có <code>GOMEMLIMIT</code> (soft limit).</li>
+          <li>pprof: CPU, heap (inuse/alloc), goroutine, mutex, block.</li>
+          <li>Benchmark: loop <code>b.N</code>, <code>-benchmem</code>, chặn dead-code elimination.</li>
+          <li>Tối ưu: pre-allocate, sync.Pool, tránh interface boxing, strings.Builder.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 1. ALLOCATOR -->
+    <section id="allocator">
+      <h2 class="section-title"><span class="num">1</span> Memory Allocator</h2>
+      <p>Go dùng allocator kiểu <strong>TCMalloc</strong> (thread-caching malloc), tối ưu cho môi trường nhiều goroutine.</p>
+      <div class="dg">
+        <div class="dg-title">Kiến trúc phân tầng — càng lên cao càng cần lock mạnh, càng chậm</div>
+        <div class="dg-wrap">
+          <div class="node green">Goroutine cần cấp object nhỏ</div>
+          <div class="arrow-v"></div>
+          <div class="node green wide big">mcache (per-P)<span class="sub">KHÔNG lock · span theo size class · NHANH NHẤT</span></div>
+          <span class="arrow-lbl">hết span trống ↓</span>
+          <div class="arrow-v"></div>
+          <div class="node accent wide big">mcentral<span class="sub">lock nhẹ · kho span dùng chung cho 1 size class</span></div>
+          <span class="arrow-lbl">hết span ↓</span>
+          <div class="arrow-v"></div>
+          <div class="node orange wide big">mheap<span class="sub">lock toàn cục · quản lý toàn heap, xin OS khi cần</span></div>
+          <div class="arrow-v"></div>
+          <div class="node muted">OS (mmap theo arena lớn)</div>
+        </div>
+      </div>
+      <div class="block how">
+        <div class="block-label">Size class &amp; tại sao giảm fragmentation</div>
+        <p>Go chia object nhỏ vào ~70 <strong>size class</strong> (8B, 16B, 32B, ...). Yêu cầu 20 bytes được làm tròn lên class 24B. Mỗi size class có span riêng chứa các object cùng kích thước → giảm phân mảnh ngoài (external fragmentation) và cho phép cấp phát/giải phóng O(1) trong span. Đánh đổi: phân mảnh trong (internal) nhẹ do làm tròn.</p>
+      </div>
+      <table>
+        <tr><th>Loại object</th><th>Đường đi</th></tr>
+        <tr><td>Tiny (&lt;16B, không chứa pointer)</td><td>Gộp nhiều vào 1 block 16B (tiny allocator)</td></tr>
+        <tr><td>Small (16B–32KB)</td><td>mcache → mcentral → mheap theo size class</td></tr>
+        <tr><td>Large (&gt;32KB)</td><td>Cấp trực tiếp từ mheap (span riêng)</td></tr>
+      </table>
+      <div class="block why">
+        <div class="block-label">Tại sao mcache per-P quan trọng</div>
+        <p>Vì gắn với P (không phải M hay G), cấp phát trong mcache <strong>không cần lock</strong> — chỉ một P truy cập tại một thời điểm. Đây là lý do cấp phát object nhỏ trong Go rất nhanh dù có hàng nghìn goroutine.</p>
+      </div>
+    </section>
+
+    <!-- 2. ESCAPE -->
+    <section id="escape">
+      <h2 class="section-title"><span class="num">2</span> Escape Analysis</h2>
+      <p>Đã giới thiệu ở Week 1; đây đào sâu góc độ performance.</p>
+      <div class="dg">
+        <div class="dg-wrap">
+          <div class="node accent wide">Biến local trong hàm</div>
+          <div class="arrow-v"></div>
+          <div class="node purple" style="max-width:360px">Địa chỉ có thoát khỏi scope hàm?<span class="sub">return &amp;v · gán interface · gửi chan · closure · biến global</span></div>
+          <div class="dg-row dg-gap-lg top" style="margin-top:6px">
+            <div class="dg-col">
+              <span class="arrow-lbl" style="color:var(--accent-2)">KHÔNG ↓</span>
+              <div class="node" style="max-width:220px">Size biết compile-time &amp; đủ nhỏ?</div>
+              <div class="dg-row dg-gap-lg" style="margin-top:6px">
+                <div class="dg-col"><span class="arrow-lbl" style="color:var(--accent-2)">CÓ</span><div class="node green big">STACK</div></div>
+                <div class="dg-col"><span class="arrow-lbl" style="color:var(--danger)">KHÔNG</span><div class="node red big">HEAP</div></div>
+              </div>
+            </div>
+            <div class="dg-col">
+              <span class="arrow-lbl" style="color:var(--danger)">CÓ ↓</span>
+              <div class="node red big">HEAP</div>
+              <span class="sub" style="font-size:11px;color:var(--text-dim)">tạo việc cho GC</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Giảm heap allocation</div>
+        <ul>
+          <li>Tránh trả pointer khi không cần (struct nhỏ trả value).</li>
+          <li>Tránh <code>interface{}</code> trong hot path (boxing → escape). <code>fmt.*</code> là thủ phạm phổ biến.</li>
+          <li>Pre-size slice/map: <code>make([]T,0,n)</code>, <code>make(map[K]V,n)</code>.</li>
+          <li>Tái sử dụng buffer thay vì cấp mới mỗi vòng lặp.</li>
+          <li>Kiểm chứng: <code>go build -gcflags="-m"</code> hoặc <code>-gcflags="-m -m"</code> (chi tiết hơn).</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 3. GC -->
+    <section id="gc">
+      <h2 class="section-title"><span class="num">3</span> Garbage Collector</h2>
+      <div class="block why">
+        <div class="block-label">Triết lý GC của Go</div>
+        <p>Go chọn GC tối ưu cho <strong>độ trễ thấp và đơn giản</strong> hơn là throughput tối đa: <em>non-generational, non-compacting, concurrent tri-color mark &amp; sweep</em>. Không generational (không chia young/old gen) để giữ runtime đơn giản — đánh đổi được chấp nhận vì đa số object Go chết trẻ nhưng escape analysis đã lọc nhiều object trên stack rồi.</p>
+      </div>
+
+      <h3>Tri-color marking</h3>
+      <div class="dg">
+        <div class="dg-row" style="margin-bottom:16px">
+          <div class="node" style="border-color:#888;color:#ccc">Trắng<span class="sub">chưa thăm · rác tiềm năng</span></div>
+          <div class="node muted" style="border-color:#9198a1;color:#9198a1;border-style:solid">Xám<span class="sub">đã thăm, con chưa quét</span></div>
+          <div class="node" style="background:#1a1f26;border-color:#444;color:#e6edf3">Đen<span class="sub">đã quét hết · reachable</span></div>
+        </div>
+        <div class="dg-wrap">
+          <div class="node accent wide">Bắt đầu: tất cả TRẮNG · roots (stack, global) → XÁM</div>
+          <div class="arrow-v"></div>
+          <div class="node purple" style="max-width:420px">Lặp: lấy 1 XÁM → quét con → tô con XÁM → tô chính nó ĐEN<span class="sub">tới khi không còn object XÁM</span></div>
+          <div class="arrow-v"></div>
+          <div class="node green wide">Mọi TRẮNG còn lại = rác → sweep</div>
+        </div>
+        <div class="dg-note"><strong>Strong tri-color invariant:</strong> KHÔNG có object ĐEN nào trỏ trực tiếp tới object TRẮNG.</div>
+      </div>
+
+      <h3>Các pha GC</h3>
+      <div class="dg">
+        <div class="dg-row scroll">
+          <div class="node red">Mark Setup<span class="sub">STW ~10-100µs · bật WB</span></div>
+          <div class="arrow-h" style="width:30px"></div>
+          <div class="node green">Marking<span class="sub">CONCURRENT · chạy cùng chương trình</span></div>
+          <div class="arrow-h" style="width:30px"></div>
+          <div class="node red">Mark Term.<span class="sub">STW ~10-100µs · tắt WB</span></div>
+          <div class="arrow-h" style="width:30px"></div>
+          <div class="node green">Sweep<span class="sub">CONCURRENT · nền</span></div>
+        </div>
+        <div class="dg-legend">
+          <span class="lg"><span class="sw red"></span> STW (chỉ 2 điểm ngắn)</span>
+          <span class="lg"><span class="sw green"></span> Concurrent (phần nặng)</span>
+          <span class="lg">WB = write barrier</span>
+        </div>
+      </div>
+
+      <h3>Write Barrier — vì sao cần</h3>
+      <div class="block how">
+        <div class="block-label">Vấn đề khi mark song song</div>
+        <p>Trong lúc GC mark, chương trình (mutator) vẫn chạy và có thể sửa pointer. Kịch bản hỏng: object ĐEN mới trỏ tới object TRẮNG, đồng thời tham chiếu cũ tới object TRẮNG đó bị xóa → GC tưởng TRẮNG là rác → thu hồi nhầm object còn sống → <strong>memory corruption</strong>.</p>
+      </div>
+      <div class="dg">
+        <div class="dg-row dg-gap-lg top scroll">
+          <div class="dg-group" style="border-color:var(--danger)">
+            <span class="grp-label" style="color:var(--danger)">Không có write barrier — HỎNG</span>
+            <div class="dg-row"><div class="node" style="background:#1a1f26;border-color:#444;color:#e6edf3">A (đen)</div><div class="arrow-h grn" style="width:36px"></div><div class="node" style="border-color:#888;color:#ccc">C (trắng)</div></div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)">A vừa trỏ tới C (C reachable)</span>
+            <div class="dg-row"><div class="node muted">B (xám)</div><div class="arrow-h red" style="width:36px"></div><div class="node muted sm">xóa trỏ C</div></div>
+            <span class="sub" style="font-size:11px;color:var(--danger)">B (đen) quét xong, C vẫn TRẮNG → thu hồi nhầm!</span>
+          </div>
+          <div class="dg-group" style="border-color:var(--accent-2)">
+            <span class="grp-label" style="color:var(--accent-2)">Có write barrier — ĐÚNG</span>
+            <div class="node green" style="max-width:220px">Khi ghi pointer → "tô xám" object liên quan</div>
+            <div class="arrow-v grn"></div>
+            <div class="node green">C được tô XÁM → GC sẽ quét C</div>
+            <span class="sub" style="font-size:11px;color:var(--text-dim)">không thu hồi nhầm object còn sống</span>
+          </div>
+        </div>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">STW trong Go ngắn cỡ nào</div>
+        <p>Từ Go 1.8+, STW pause thường &lt; 1ms (thực tế ~10–100µs) nhờ marking concurrent + preemption bất đồng bộ (Go 1.14). Câu trả lời interview: "STW rất ngắn vì phần marking nặng chạy song song với chương trình; STW chỉ dành cho setup và termination."</p>
+      </div>
+    </section>
+
+    <!-- 4. GC TUNING -->
+    <section id="gctuning">
+      <h2 class="section-title"><span class="num">4</span> GC Tuning: GOGC &amp; GOMEMLIMIT</h2>
+      <div class="dg">
+        <div class="dg-title">GOGC điều khiển ngưỡng heap kích hoạt GC (live heap sau GC = 100MB)</div>
+        <div class="dg-row dg-gap-lg">
+          <div class="dg-col"><div class="node green big">GOGC=50</div><span class="arrow-lbl">trigger 150MB</span><span class="sub" style="font-size:11px;color:var(--text-dim)">GC nhiều, ít RAM, tốn CPU</span></div>
+          <div class="dg-col"><div class="node accent big">GOGC=100</div><span class="arrow-lbl">trigger 200MB (mặc định)</span><span class="sub" style="font-size:11px;color:var(--text-dim)">100 × (1 + 100/100)</span></div>
+          <div class="dg-col"><div class="node orange big">GOGC=200</div><span class="arrow-lbl">trigger 300MB</span><span class="sub" style="font-size:11px;color:var(--text-dim)">GC ít, nhiều RAM, ít CPU</span></div>
+          <div class="dg-col"><div class="node red big">GOGC=off</div><span class="arrow-lbl">tắt GC</span><span class="sub" style="font-size:11px;color:var(--text-dim)">chỉ batch job ngắn</span></div>
+        </div>
+      </div>
+      <table>
+        <tr><th>Tham số</th><th>Tác dụng</th><th>Khi nào dùng</th></tr>
+        <tr><td><code>GOGC</code> / <code>SetGCPercent</code></td><td>Ngưỡng tăng trưởng heap trước khi GC</td><td>Đánh đổi CPU ↔ RAM</td></tr>
+        <tr><td><code>GOMEMLIMIT</code> / <code>SetMemoryLimit</code> (1.19+)</td><td>Soft limit tổng bộ nhớ; GC tăng cường khi gần chạm</td><td>Container có giới hạn RAM, tránh OOM</td></tr>
+      </table>
+      <div class="block best">
+        <div class="block-label">Chiến lược trong container</div>
+        <p>Đặt <code>GOMEMLIMIT</code> ~ 90% RAM limit của container để tránh OOM-kill; kết hợp GOGC cao để giảm CPU. Trước 1.19, chỉ có GOGC nên dễ bị OOM khi burst allocation. Đây là câu hỏi thực tế cho backend chạy Kubernetes.</p>
+      </div>
+      <h3>Đọc MemStats</h3>
+      <pre><code><span class="tok-kw">var</span> s runtime.<span class="tok-type">MemStats</span>
+runtime.<span class="tok-fn">ReadMemStats</span>(&s)
+s.Alloc        <span class="tok-com">// heap đang dùng (bytes)</span>
+s.TotalAlloc   <span class="tok-com">// tổng đã cấp phát tích lũy (đo allocation rate)</span>
+s.NumGC        <span class="tok-com">// số chu kỳ GC</span>
+s.PauseTotalNs <span class="tok-com">// tổng thời gian STW</span></code></pre>
+    </section>
+
+    <!-- 5. PPROF -->
+    <section id="pprof">
+      <h2 class="section-title"><span class="num">5</span> Profiling với pprof</h2>
+      <table>
+        <tr><th>Profile</th><th>Đo gì</th><th>Dùng khi</th></tr>
+        <tr><td>CPU</td><td>Thời gian CPU theo hàm</td><td>CPU cao, tìm hot path</td></tr>
+        <tr><td>Heap (inuse)</td><td>Bộ nhớ đang sống</td><td>Tìm memory leak</td></tr>
+        <tr><td>Heap (alloc)</td><td>Tổng đã cấp (kể cả đã free)</td><td>Tìm nguồn tạo GC pressure</td></tr>
+        <tr><td>Goroutine</td><td>Stack mọi goroutine</td><td>Goroutine leak, deadlock</td></tr>
+        <tr><td>Mutex</td><td>Thời gian tranh chấp lock</td><td>Lock contention</td></tr>
+        <tr><td>Block</td><td>Thời gian goroutine bị block</td><td>Chờ channel/syscall lâu</td></tr>
+      </table>
+      <div class="dg">
+        <div class="dg-title">Quy trình profiling một service production</div>
+        <div class="dg-wrap">
+          <div class="node accent wide" style="text-align:left">1 · Bật endpoint<span class="sub">import _ "net/http/pprof" — mở :6060</span></div>
+          <div class="arrow-v"></div>
+          <div class="node accent wide" style="text-align:left">2 · Thu profile<span class="sub">go tool pprof …/debug/pprof/profile?seconds=30</span><span class="sub">…/heap · …/goroutine?debug=1</span></div>
+          <div class="arrow-v"></div>
+          <div class="node green wide" style="text-align:left">3 · Phân tích<span class="sub">top 20 · list funcName · web/svg (flamegraph) · peek</span></div>
+        </div>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">inuse vs alloc — phân biệt</div>
+        <p><strong>inuse_space</strong>: đang chiếm bộ nhớ ngay bây giờ → dùng tìm <em>leak</em> (thứ đáng lẽ đã free mà chưa). <strong>alloc_space</strong>: tổng đã cấp từ đầu → dùng tìm <em>allocation hotspot</em> tạo GC pressure (dù đã free). Chọn sai profile → tìm nhầm vấn đề.</p>
+      </div>
+      <div class="block best">
+        <div class="block-label">Bật mutex/block profile</div>
+        <pre><code>runtime.<span class="tok-fn">SetMutexProfileFraction</span>(<span class="tok-num">1</span>) <span class="tok-com">// lấy mẫu tranh chấp mutex</span>
+runtime.<span class="tok-fn">SetBlockProfileRate</span>(<span class="tok-num">1</span>)     <span class="tok-com">// lấy mẫu blocking</span></code></pre>
+        <p>Hai profile này tắt mặc định (có overhead). Bật khi nghi ngờ contention: CPU thấp nhưng throughput cũng thấp.</p>
+      </div>
+    </section>
+
+    <!-- 6. BENCHMARK -->
+    <section id="benchmark">
+      <h2 class="section-title"><span class="num">6</span> Benchmarking</h2>
+      <pre><code><span class="tok-kw">func</span> <span class="tok-fn">BenchmarkX</span>(b *testing.<span class="tok-type">B</span>) {
+    data := <span class="tok-fn">setup</span>()      <span class="tok-com">// setup không tính giờ</span>
+    b.<span class="tok-fn">ResetTimer</span>()      <span class="tok-com">// reset sau setup</span>
+    b.<span class="tok-fn">ReportAllocs</span>()    <span class="tok-com">// báo cáo allocation</span>
+    <span class="tok-kw">for</span> i := <span class="tok-num">0</span>; i &lt; b.N; i++ {
+        <span class="tok-fn">functionUnderTest</span>(data)
+    }
+}</code></pre>
+      <div class="block how">
+        <div class="block-label">Đọc output benchmark</div>
+        <pre><code>BenchmarkX-8   1000000   1052 ns/op   256 B/op   3 allocs/op
+           │       │          │            │            └ allocation mỗi op
+           │       │          │            └ bytes cấp phát mỗi op
+           │       │          └ thời gian mỗi op
+           │       └ số lần lặp (runtime tự chọn để ổn định)
+           └ GOMAXPROCS</code></pre>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Bẫy: compiler tối ưu bỏ code</div>
+        <pre><code><span class="tok-com">// SAI: compiler có thể loại bỏ vì kết quả không dùng</span>
+<span class="tok-kw">for</span> i := <span class="tok-num">0</span>; i &lt; b.N; i++ { _ = <span class="tok-fn">compute</span>() }
+
+<span class="tok-com">// ĐÚNG: gán vào biến package-level để chặn dead-code elimination</span>
+<span class="tok-kw">var</span> sink <span class="tok-type">int</span>
+<span class="tok-kw">func</span> <span class="tok-fn">BenchmarkX</span>(b *testing.<span class="tok-type">B</span>) {
+    <span class="tok-kw">var</span> r <span class="tok-type">int</span>
+    <span class="tok-kw">for</span> i := <span class="tok-num">0</span>; i &lt; b.N; i++ { r = <span class="tok-fn">compute</span>() }
+    sink = r
+}</code></pre>
+      </div>
+      <div class="block best">
+        <div class="block-label">So sánh trước/sau bằng benchstat</div>
+        <pre><code>go test -bench=. -count=<span class="tok-num">10</span> &gt; old.txt
+<span class="tok-com"># sửa code</span>
+go test -bench=. -count=<span class="tok-num">10</span> &gt; new.txt
+benchstat old.txt new.txt   <span class="tok-com"># cho p-value, khoảng tin cậy</span></code></pre>
+        <p>Chạy nhiều lần (<code>-count</code>) để có ý nghĩa thống kê; một lần đo dễ nhiễu.</p>
+      </div>
+    </section>
+
+    <!-- 7. WORKFLOW -->
+    <section id="workflow">
+      <h2 class="section-title"><span class="num">7</span> Optimization Workflow</h2>
+      <div class="dg">
+        <div class="dg-wrap">
+          <div class="node accent wide" style="text-align:left">1 · Baseline<span class="sub">đo hiện trạng (benchmark + metrics production)</span></div>
+          <div class="arrow-v"></div>
+          <div class="node accent wide" style="text-align:left">2 · Bottleneck<span class="sub">metrics/profile: CPU? Mem? Lock? I/O?</span></div>
+          <div class="arrow-v"></div>
+          <div class="node accent wide" style="text-align:left">3 · Profile<span class="sub">pprof top → list → flamegraph, tìm hot path</span></div>
+          <div class="arrow-v"></div>
+          <div class="node accent wide" style="text-align:left">4 · Optimize<span class="sub">áp dụng kỹ thuật CỤ THỂ cho hot path</span></div>
+          <div class="arrow-v"></div>
+          <div class="node accent wide" style="text-align:left">5 · Measure<span class="sub">benchmark lại, benchstat so sánh</span></div>
+          <div class="arrow-v"></div>
+          <div class="node green wide" style="text-align:left">6 · Validate<span class="sub">kiểm chứng trên production (canary)</span></div>
+        </div>
+        <div class="dg-note"><strong>Nguyên tắc:</strong> KHÔNG bao giờ tối ưu khi chưa đo.</div>
+      </div>
+      <table>
+        <tr><th>Vấn đề</th><th>Kỹ thuật</th></tr>
+        <tr><td>Quá nhiều allocation</td><td>Pre-allocate, sync.Pool, tái dùng object</td></tr>
+        <tr><td>Nối chuỗi</td><td><code>strings.Builder</code> / <code>[]byte</code></td></tr>
+        <tr><td>Interface overhead</td><td>Concrete type trong hot path, generics</td></tr>
+        <tr><td>Lock contention</td><td>Sharding, RWMutex, atomic, giảm critical section</td></tr>
+        <tr><td>GC pressure</td><td>Giảm allocation, tăng GOGC, GOMEMLIMIT</td></tr>
+        <tr><td>Slice/map grow</td><td>Pre-size với capacity biết trước</td></tr>
+      </table>
+      <div class="block best">
+        <div class="block-label">sync.Pool — tái dùng object tạm</div>
+        <p>Pool giữ object tạm để tái dùng, giảm allocation trong hot path (vd buffer HTTP handler, JSON encoder). Lưu ý: object trong pool <strong>có thể bị GC thu hồi bất kỳ lúc nào</strong> (không phải cache bền); luôn reset trước khi <code>Put</code>. <code>encoding/json</code>, <code>fmt</code> dùng sync.Pool nội bộ.</p>
+      </div>
+    </section>
+
+    <!-- FLASHCARDS -->
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Kiến trúc allocator của Go?</span><span class="icon">+</span></div>
+        <div class="a"><p>Ba tầng kiểu TCMalloc: mcache (per-P, không lock) → mcentral (theo size class, lock nhẹ) → mheap (toàn cục, xin OS qua mmap). Object nhỏ đi theo ~70 size class; lớn (&gt;32KB) cấp trực tiếp từ mheap; tiny (&lt;16B không pointer) gộp chung.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao cấp phát object nhỏ trong Go nhanh?</span><span class="icon">+</span></div>
+        <div class="a"><p>mcache gắn với P nên cấp phát không cần lock (chỉ 1 P truy cập). Size class cho phép cấp/free O(1) trong span. Chỉ khi mcache hết span mới phải lock lên mcentral/mheap.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>GC của Go thuộc loại nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Concurrent tri-color mark &amp; sweep, non-generational, non-compacting. Tối ưu cho độ trễ thấp (STW ~10-100µs) hơn throughput. Marking chạy song song với chương trình, chỉ STW ở mark setup và mark termination.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Tri-color invariant là gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Strong tri-color invariant: không object ĐEN nào trỏ trực tiếp tới object TRẮNG. Trắng=rác tiềm năng, Xám=đã thăm con chưa quét, Đen=đã quét hết. Kết thúc: mọi trắng còn lại là rác.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Write barrier giải quyết vấn đề gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Khi mark chạy song song, chương trình sửa pointer có thể khiến object đen trỏ tới trắng đồng thời tham chiếu cũ bị xóa → GC thu hồi nhầm. Write barrier tô xám object liên quan khi ghi pointer → đảm bảo không mất object sống.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>GOGC=100 nghĩa là gì? GOMEMLIMIT?</span><span class="icon">+</span></div>
+        <div class="a"><p>GOGC=100: GC kích hoạt khi heap tăng gấp đôi so với live heap sau GC trước. Thấp hơn → GC thường xuyên, ít RAM, tốn CPU. GOMEMLIMIT (1.19+): soft limit tổng bộ nhớ, GC tăng cường khi gần chạm → tránh OOM trong container.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Heap profile inuse vs alloc?</span><span class="icon">+</span></div>
+        <div class="a"><p>inuse_space: bộ nhớ đang sống → tìm leak. alloc_space: tổng đã cấp (kể cả đã free) → tìm allocation hotspot tạo GC pressure. Chọn sai → tìm nhầm vấn đề.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Cách viết benchmark chống compiler tối ưu?</span><span class="icon">+</span></div>
+        <div class="a"><p>Gán kết quả vào biến package-level (sink) để chặn dead-code elimination. Dùng b.ResetTimer sau setup, b.ReportAllocs cho allocation. Chạy -count nhiều lần + benchstat để có ý nghĩa thống kê.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Optimization workflow đúng?</span><span class="icon">+</span></div>
+        <div class="a"><p>Baseline → tìm bottleneck (profile) → xác định hot path → tối ưu cụ thể → đo lại (benchstat) → validate production. Nguyên tắc: không bao giờ tối ưu khi chưa đo.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>sync.Pool dùng khi nào và lưu ý gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Tái dùng object tạm trong hot path (buffer, encoder) để giảm allocation. Lưu ý: object có thể bị GC thu hồi bất kỳ lúc nào (không phải cache bền), luôn reset trước Put. Không dùng cho object cần tồn tại lâu.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao fmt.Println gây allocation?</span><span class="icon">+</span></div>
+        <div class="a"><p>Nhận <code>...interface{}</code> → mọi tham số bị boxing → escape lên heap. Xuất hiện nhiều trong allocation profile. Trong hot path nên tránh fmt, dùng strconv/append trực tiếp.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="week2.html"><span class="dir">← Trước</span><span class="title">Week 2 · Concurrency</span></a>
+      <a href="week4.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 4 · Backend</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>
