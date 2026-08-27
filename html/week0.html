@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 0 – Foundations & Tooling (Deep Dive) | Senior Go Interview</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Golang knowledge</div></a>
+      <div class="sub">Deep Dive</div>
+    </div>
+    <h2>Week 0 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#modules">1. Modules &amp; Dependencies</a>
+      <a href="#testing">2. Testing chiều sâu</a>
+      <a href="#tooling">3. Tooling &amp; Quality</a>
+      <a href="#errors">4. Error Handling</a>
+      <a href="#json">5. encoding/json</a>
+      <a href="#reflect">6. Reflection &amp; Ecosystem</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week0.html" class="active">Week 0 · Foundations</a>
+      <a href="week1.html">Week 1 · Go Core</a>
+      <a href="week2.html">Week 2 · Concurrency</a>
+      <a href="week3.html">Week 3 · Runtime</a>
+      <a href="week4.html">Week 4 · Backend</a>
+      <a href="week5.html">Week 5 · DB/Redis/MQ</a>
+      <a href="week6.html">Week 6 · Distributed</a>
+      <a href="week7.html">Week 7 · System Design</a>
+      <a href="week8.html">Week 8 · Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 0 · Deep Dive</span>
+      <h1>Foundations &amp; Tooling</h1>
+      <p>Phần "ecosystem nền tảng" theo roadmap.sh/golang mà interviewer coi là hiển nhiên ở mức senior: modules, testing chuyên sâu, tooling, error handling hiện đại, encoding/json, reflection.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★</b><span>Priority</span></div>
+        <div class="item"><b>6</b><span>Chủ đề</span></div>
+        <div class="item"><b>~8h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <p>Bộ plan gốc rất mạnh về internals/concurrency/distributed nhưng nhẹ phần "chững tay hằng ngày". Đây là những thứ ít được ôn nhưng hay lộ ra ngay ở coding round hoặc câu hỏi phụ.</p>
+      <div class="tldr">
+        <div class="label">TL;DR</div>
+        <ul>
+          <li><code>go.sum</code> = checksum chống tampering; Go dùng <strong>MVS</strong> (chọn version thấp nhất thỏa mãn), khác npm.</li>
+          <li>Test idiom: <strong>table-driven + subtests</strong>; mock bằng <strong>interface ở consumer</strong>; fuzzing tìm edge case.</li>
+          <li><code>golangci-lint</code> là meta-linter chuẩn CI; <code>delve</code> để debug goroutine.</li>
+          <li><code>%w</code> wrap lỗi; <strong>errors.Is</strong> (giá trị) vs <strong>errors.As</strong> (kiểu).</li>
+          <li>json: field phải <strong>exported</strong>; <code>-</code> ẩn field; <code>omitempty</code> bỏ zero value; số vào <code>interface{}</code> thành float64.</li>
+          <li>Reflection là nền của json/ORM — mạnh nhưng chậm, tránh hot path.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 1. MODULES -->
+    <section id="modules">
+      <h2 class="section-title"><span class="num">1</span> Modules &amp; Dependency Management</h2>
+      <table>
+        <tr><th>File</th><th>Vai trò</th></tr>
+        <tr><td><code>go.mod</code></td><td>tên module + Go version + dependency (trực tiếp &amp; indirect)</td></tr>
+        <tr><td><code>go.sum</code></td><td>checksum (hash) từng version → chống ai đó sửa version đã publish (supply-chain)</td></tr>
+      </table>
+      <div class="block how">
+        <div class="block-label">MVS — Minimal Version Selection</div>
+        <p>Go chọn version <strong>thấp nhất thỏa mãn</strong> mọi yêu cầu (npm chọn cao nhất). Kết quả: build <strong>reproducible</strong>, không "tự vỡ" khi có minor version mới. <code>go.sum</code> đảm bảo nội dung version không đổi.</p>
+      </div>
+      <div class="block why">
+        <div class="block-label">Semantic Import Versioning</div>
+        <p>Major ≥ 2 phải đổi import path: <code>github.com/x/y/v2</code>. Nhờ vậy v1 và v2 cùng tồn tại trong một build. Major = breaking change.</p>
+      </div>
+      <table>
+        <tr><th>Lệnh</th><th>Ý nghĩa</th></tr>
+        <tr><td><code>go mod tidy</code></td><td>thêm dep thiếu, xóa dep thừa, đồng bộ go.sum</td></tr>
+        <tr><td><code>go get pkg@v1.2.3</code></td><td>thêm/nâng version cụ thể</td></tr>
+        <tr><td><code>go mod vendor</code></td><td>copy dep vào <code>vendor/</code> (build offline/audit)</td></tr>
+        <tr><td><code>go work use ./m</code></td><td>workspace cho monorepo (thay <code>replace</code>)</td></tr>
+      </table>
+    </section>
+
+    <!-- 2. TESTING -->
+    <section id="testing">
+      <h2 class="section-title"><span class="num">2</span> Testing chiều sâu</h2>
+      <div class="block best">
+        <div class="block-label">Table-driven + subtests (idiom chuẩn)</div>
+        <pre><code>tests := []<span class="tok-kw">struct</span>{ name string; in, want int }{
+    {<span class="tok-str">"gold"</span>, <span class="tok-num">100</span>, <span class="tok-num">80</span>},
+    {<span class="tok-str">"silver"</span>, <span class="tok-num">100</span>, <span class="tok-num">90</span>},
+}
+<span class="tok-kw">for</span> _, tt := <span class="tok-kw">range</span> tests {
+    t.<span class="tok-fn">Run</span>(tt.name, <span class="tok-kw">func</span>(t *testing.T) {  <span class="tok-com">// subtest: chạy/lọc riêng</span>
+        <span class="tok-kw">if</span> got := <span class="tok-fn">Discount</span>(tt.in); got != tt.want {
+            t.<span class="tok-fn">Errorf</span>(<span class="tok-str">"got %d want %d"</span>, got, tt.want)
+        }
+    })
+}</code></pre>
+        <p>Thêm case = thêm 1 dòng. <code>t.Run</code> báo cáo rõ case nào fail và lọc được <code>-run TestX/gold</code>.</p>
+      </div>
+      <div class="block how">
+        <div class="block-label">Mock qua interface (không có mock magic)</div>
+        <p>Định nghĩa <strong>interface nhỏ ở phía consumer</strong>, viết implementation giả cho test. Lib hỗ trợ: gomock (sinh code), testify/mock, moq. Interface ở consumer → dễ mock, giảm coupling.</p>
+      </div>
+      <div class="grid-2">
+        <div class="col">
+          <h4>Coverage</h4>
+          <pre><code>go test -coverprofile=c.out ./...
+go tool cover -html=c.out</code></pre>
+          <p>Coverage cao ≠ test tốt. Ưu tiên branch quan trọng + edge case.</p>
+        </div>
+        <div class="col">
+          <h4>Fuzzing (1.18+)</h4>
+          <pre><code>func FuzzParse(f *testing.F) {
+  f.Add("seed")
+  f.Fuzz(func(t *T, s string){...})
+}</code></pre>
+          <p>Tự sinh input tìm crash/sai. Kiểm tra property (round-trip).</p>
+        </div>
+      </div>
+      <div class="block purpose">
+        <div class="block-label">assert vs require · Helper · Cleanup</div>
+        <ul>
+          <li><code>assert</code> ghi lỗi rồi tiếp tục; <code>require</code> ghi lỗi và <strong>dừng ngay</strong> (dùng cho precondition).</li>
+          <li><code>t.Helper()</code> → stacktrace trỏ về dòng gọi thật, không phải trong helper.</li>
+          <li><code>t.Cleanup(fn)</code> → dọn dẹp sau test (đúng cả với subtest &amp; parallel).</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 3. TOOLING -->
+    <section id="tooling">
+      <h2 class="section-title"><span class="num">3</span> Tooling &amp; Code Quality</h2>
+      <table>
+        <tr><th>Tool</th><th>Vai trò</th></tr>
+        <tr><td><code>gofmt</code> / <code>goimports</code></td><td>format chuẩn + tự sắp xếp/bỏ import</td></tr>
+        <tr><td><code>go vet</code></td><td>bug tĩnh cơ bản: printf sai, copy lock</td></tr>
+        <tr><td><code>staticcheck</code></td><td>linter mạnh: dead code, sai dùng API</td></tr>
+        <tr><td><code>golangci-lint</code></td><td><strong>meta-linter</strong> chạy nhiều linter song song — chuẩn CI</td></tr>
+        <tr><td><code>delve</code> (dlv)</td><td>debugger: breakpoint, step, <code>goroutines</code> (debug deadlock)</td></tr>
+        <tr><td><code>go build -race</code></td><td>phát hiện data race lúc runtime</td></tr>
+      </table>
+      <div class="block best">
+        <div class="block-label">Nên có trong mọi repo</div>
+        <p>CI chạy <code>gofmt -l</code> (fail nếu chưa format), <code>go vet</code>, <code>golangci-lint run</code>, và <code>go test -race ./...</code>. Đây là dấu hiệu "chững tay" mà interviewer đánh giá cao.</p>
+      </div>
+    </section>
+
+    <!-- 4. ERRORS -->
+    <section id="errors">
+      <h2 class="section-title"><span class="num">4</span> Error Handling hiện đại</h2>
+      <pre><code><span class="tok-kw">return</span> fmt.<span class="tok-fn">Errorf</span>(<span class="tok-str">"load user %s: %w"</span>, id, err)  <span class="tok-com">// %w giữ chain, unwrap được</span></code></pre>
+      <div class="grid-2">
+        <div class="col">
+          <h4>errors.Is — theo GIÁ TRỊ</h4>
+          <pre><code>if errors.Is(err, sql.ErrNoRows) {
+    return ErrNotFound
+}</code></pre>
+          <p>"Có phải lỗi X không?" — dùng cho sentinel error.</p>
+        </div>
+        <div class="col">
+          <h4>errors.As — theo KIỂU</h4>
+          <pre><code>var pg *pgconn.PgError
+if errors.As(err, &amp;pg) {
+    _ = pg.Code // đọc field
+}</code></pre>
+          <p>Trích custom error type để đọc metadata bên trong.</p>
+        </div>
+      </div>
+      <div class="block best">
+        <div class="block-label">Nguyên tắc senior</div>
+        <ul>
+          <li>Xử lý lỗi <strong>một lần</strong>: hoặc log, hoặc return — không cả hai (tránh log trùng).</li>
+          <li>Layer dưới <strong>wrap + return</strong> kèm context; layer ngoài cùng log một lần.</li>
+          <li><code>panic</code> chỉ cho lỗi lập trình không hồi phục, KHÔNG cho lỗi nghiệp vụ.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 5. JSON -->
+    <section id="json">
+      <h2 class="section-title"><span class="num">5</span> encoding/json (thực chiến)</h2>
+      <pre><code><span class="tok-kw">type</span> <span class="tok-type">User</span> <span class="tok-kw">struct</span> {
+    ID       string <span class="tok-str">`json:"id"`</span>
+    Password string <span class="tok-str">`json:"-"`</span>                 <span class="tok-com">// KHÔNG bao giờ serialize</span>
+    Nickname string <span class="tok-str">`json:"nickname,omitempty"`</span> <span class="tok-com">// bỏ khi zero value</span>
+}</code></pre>
+      <div class="block pitfall">
+        <div class="block-label">Bẫy hay gặp</div>
+        <ul>
+          <li>Field <strong>không exported</strong> (chữ thường) → json bỏ qua. Phải viết hoa.</li>
+          <li>Số JSON vào <code>interface{}</code> → luôn thành <code>float64</code> (mất chính xác int64 lớn). Dùng <code>json.Number</code> / <code>UseNumber()</code>.</li>
+          <li><code>omitempty</code> không áp dụng cho struct lồng non-pointer → dùng con trỏ.</li>
+        </ul>
+      </div>
+      <div class="block how">
+        <div class="block-label">Streaming + strict</div>
+        <pre><code>dec := json.<span class="tok-fn">NewDecoder</span>(r.Body)
+dec.<span class="tok-fn">DisallowUnknownFields</span>()  <span class="tok-com">// reject field lạ (strict API)</span>
+dec.<span class="tok-fn">Decode</span>(&amp;u)                <span class="tok-com">// stream, không load hết vào RAM</span></code></pre>
+      </div>
+    </section>
+
+    <!-- 6. REFLECT -->
+    <section id="reflect">
+      <h2 class="section-title"><span class="num">6</span> Reflection &amp; Ecosystem</h2>
+      <div class="block why">
+        <div class="block-label">json.Marshal hoạt động thế nào?</div>
+        <p>Dùng <strong>reflection</strong> (<code>reflect</code>) duyệt field exported, đọc struct tag <code>json:"..."</code> để lấy key + option, rồi encode đệ quy. Vì reflection nên chậm hơn code sinh sẵn và cần field exported. Đây cũng là nền của ORM (GORM) và validator.</p>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Nhược điểm reflection</div>
+        <p>Chậm (nhiều lần code tĩnh), mất type-safety (lỗi runtime thay vì compile-time), khó đọc. Chỉ dùng cho serialization/framework, tránh hot path.</p>
+      </div>
+      <div class="grid-2">
+        <div class="col">
+          <h4>Config</h4>
+          <p>Ưu tiên: <strong>flag &gt; env &gt; file &gt; default</strong>. 12-factor: config/secret qua env, không hardcode/commit.</p>
+        </div>
+        <div class="col">
+          <h4>Logging</h4>
+          <p><code>log/slog</code> (stdlib 1.21+) structured. Hoặc zap/zerolog. JSON/key-value dễ query trên ELK/Loki.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- FLASHCARDS -->
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>go.mod vs go.sum?</span><span class="icon">+</span></div>
+        <div class="a"><p>go.mod khai báo module + Go version + dependency. go.sum chứa checksum từng version để đảm bảo toàn vẹn, chống ai đó sửa version đã publish (supply-chain security).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>MVS là gì, khác npm thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Minimal Version Selection — Go chọn version thấp nhất thỏa mãn mọi yêu cầu; npm chọn cao nhất. MVS làm build reproducible, ổn định.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao major ≥ 2 phải đổi import path?</span><span class="icon">+</span></div>
+        <div class="a"><p>Semantic Import Versioning: github.com/x/y/v2. Major = breaking change; đổi path cho phép v1 và v2 cùng tồn tại trong một build.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Mock trong Go làm thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Định nghĩa interface nhỏ ở phía consumer, viết implementation giả cho test. Dùng gomock/testify/moq. Interface ở consumer → dễ mock, giảm coupling.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>assert vs require (testify)?</span><span class="icon">+</span></div>
+        <div class="a"><p>assert ghi lỗi nhưng test tiếp tục; require ghi lỗi và dừng ngay — dùng cho precondition (nếu setup fail thì các assert sau vô nghĩa).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Fuzzing giải quyết gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Tự sinh input ngẫu nhiên từ seed corpus để tìm case gây panic/sai mà con người khó nghĩ ra — đặc biệt cho parser/encoder. Kiểm tra property như round-trip.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>go vet vs golangci-lint?</span><span class="icon">+</span></div>
+        <div class="a"><p>go vet là công cụ stdlib phát hiện bug tĩnh cơ bản. golangci-lint là meta-linter chạy hàng chục linter (govet, staticcheck, errcheck, gosec...) song song — chuẩn CI.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>%w khác %v? errors.Is vs errors.As?</span><span class="icon">+</span></div>
+        <div class="a"><p>%w bọc error giữ chain (unwrap được); %v chỉ nối chuỗi. errors.Is so khớp theo giá trị (sentinel); errors.As trích theo kiểu (custom struct) để đọc field.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao field struct không ra JSON?</span><span class="icon">+</span></div>
+        <div class="a"><p>Field không exported (chữ thường) → json dùng reflection chỉ thấy exported field. Phải viết hoa chữ đầu.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Unmarshal số vào interface{} bị gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Luôn thành float64 → mất chính xác với int64 lớn. Dùng json.Number qua UseNumber() hoặc unmarshal vào kiểu cụ thể.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>json.Marshal hoạt động thế nào bên dưới?</span><span class="icon">+</span></div>
+        <div class="a"><p>Dùng reflection duyệt field exported, đọc struct tag json để lấy key + option (omitempty, -), encode đệ quy. Vì reflection nên chậm và cần field exported.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="index.html"><span class="dir">← Trước</span><span class="title">Study Hub</span></a>
+      <a href="week1.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 1 · Go Core</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

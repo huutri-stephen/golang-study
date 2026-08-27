@@ -19,10 +19,11 @@ Chuẩn bị cho Senior Backend Engineer – Golang interview, tập trung vào:
 
 ---
 
-# 2. Roadmap tổng quan – 8 tuần
+# 2. Roadmap tổng quan – 8 tuần (+ Week 0 nền tảng)
 
 | Tuần | Chủ đề | Priority |
 |---|---|---|
+| 0 | Foundations & Tooling (modules, testing, tooling, errors, json) | ⭐⭐⭐⭐ |
 | 1 | Go Core + Memory | ⭐⭐⭐⭐⭐ |
 | 2 | Goroutine + Concurrency | ⭐⭐⭐⭐⭐ |
 | 3 | Go Runtime + Performance | ⭐⭐⭐⭐⭐ |
@@ -38,6 +39,59 @@ Chuẩn bị cho Senior Backend Engineer – Golang interview, tập trung vào:
 - 30% Coding
 - 25% System Design / Architecture
 - 15% Mock Interview / Review
+
+---
+
+# 2b. Week 0 – Foundations & Tooling
+
+> Bổ sung theo roadmap.sh/golang: phần "ecosystem nền tảng" mà interviewer coi là hiển nhiên ở mức senior.
+> Có thể học xen kẽ hoặc lồng vào routine hằng ngày, không nhất thiết tách tuần riêng.
+
+## Modules & Dependency Management
+
+- [ ] `go.mod` / `go.sum` (checksum, supply-chain integrity)
+- [ ] `go mod tidy` / `download` / `vendor`
+- [ ] Semantic versioning + Semantic Import Versioning (`/v2`)
+- [ ] MVS (Minimal Version Selection) vs npm
+- [ ] Go workspaces (`go work`) cho monorepo
+- [ ] `replace` directive
+
+## Testing (chiều sâu)
+
+- [ ] Table-driven tests + subtests (`t.Run`)
+- [ ] Mocking qua interface (gomock / testify / moq)
+- [ ] Coverage (`-cover`, `-coverprofile`)
+- [ ] Fuzzing (`go test -fuzz`)
+- [ ] `t.Helper()`, `t.Cleanup()`, `require` vs `assert`
+- [ ] Integration test (build tags, testcontainers)
+
+## Tooling & Code Quality
+
+- [ ] `gofmt` / `goimports`
+- [ ] `go vet`
+- [ ] `staticcheck`
+- [ ] `golangci-lint` (CI)
+- [ ] `delve` (dlv) debugger
+
+## Error Handling hiện đại
+
+- [ ] `fmt.Errorf` + `%w` wrapping
+- [ ] `errors.Is` vs `errors.As`
+- [ ] Sentinel error vs custom error type
+- [ ] `errors.Join` (Go 1.20+)
+
+## encoding/json
+
+- [ ] Struct tags (`json:"-"`, `omitempty`)
+- [ ] Marshal / Unmarshal / streaming Decoder
+- [ ] `DisallowUnknownFields`, `UseNumber`
+- [ ] Custom `MarshalJSON`
+
+## Reflection & Ecosystem
+
+- [ ] `reflect` cơ bản (nền tảng của json/ORM/validator)
+- [ ] Config: flag > env > file (viper/envconfig)
+- [ ] Logging: `log/slog`, zap, zerolog
 
 ---
 
@@ -309,6 +363,28 @@ POST /payments
 Idempotency-Key: abc123
 ```
 
+## gRPC & Protobuf
+
+- [ ] Protobuf IDL, field number & compatibility
+- [ ] 4 kiểu RPC (unary, server/client/bidi streaming)
+- [ ] gRPC vs REST trade-offs
+- [ ] Interceptor (auth, logging, tracing, recovery)
+- [ ] Deadline propagation, status codes
+- [ ] Load balancing với connection bền (HTTP/2)
+
+## Security / Auth
+
+- [ ] AuthN vs AuthZ (401 vs 403)
+- [ ] JWT (HS256/RS256, claims, exp, refresh token)
+- [ ] OAuth2 / OIDC (Authorization Code + PKCE)
+- [ ] Password hashing (bcrypt/argon2), constant-time compare
+- [ ] Input validation, SQL injection, CORS, body size limit
+
+## Web Frameworks
+
+- [ ] `net/http` + ServeMux (Go 1.22 routing)
+- [ ] chi / Gin / Echo / Fiber trade-offs
+
 ---
 
 # 7. Week 5 – Database + Redis + Messaging
@@ -392,6 +468,17 @@ Network
 - [ ] Exactly-once
 - [ ] Retry
 - [ ] DLQ
+
+## Go Database Access
+
+- [ ] `database/sql` (pool, `sql.Open` lazy, Ping)
+- [ ] QueryRow/Query + Scan, `sql.ErrNoRows`
+- [ ] `rows.Close()` + `rows.Err()`
+- [ ] Placeholder chống SQL injection
+- [ ] Transaction: `BeginTx` + `defer tx.Rollback()`
+- [ ] Prepared statement
+- [ ] sqlx / sqlc / GORM / ent trade-offs
+- [ ] Migrations (golang-migrate / goose), backward-compatible
 
 ---
 
@@ -662,6 +749,18 @@ Prevention
 - [ ] `defer` execution order?
 - [ ] `panic/recover`?
 - [ ] Generics?
+- [ ] `errors.Is` vs `errors.As`? `%w` wrapping?
+- [ ] `json:"-"` vs `omitempty`? Vì sao field phải exported?
+
+## Foundations & Tooling
+
+- [ ] go.mod vs go.sum?
+- [ ] MVS (Minimal Version Selection)?
+- [ ] Semantic Import Versioning (`/v2`)?
+- [ ] Table-driven test + subtest?
+- [ ] Mock trong Go (không có mock magic)?
+- [ ] Fuzzing giải quyết gì?
+- [ ] `go vet` vs `golangci-lint`?
 
 ## Concurrency
 
@@ -706,6 +805,21 @@ Prevention
 - [ ] MVCC?
 - [ ] Deadlock?
 - [ ] Connection pool?
+- [ ] `sql.DB` là pool hay connection?
+- [ ] `defer tx.Rollback()` pattern?
+- [ ] sqlx vs GORM vs sqlc?
+- [ ] Migration backward-compatible?
+
+## gRPC & Security
+
+- [ ] gRPC vs REST?
+- [ ] Protobuf field number compatibility?
+- [ ] 4 kiểu RPC?
+- [ ] gRPC interceptor?
+- [ ] JWT stateless — ưu/nhược, cách revoke?
+- [ ] HS256 vs RS256?
+- [ ] 401 vs 403?
+- [ ] Password hashing (vì sao không SHA-256 trần)?
 
 ## Distributed Systems
 
@@ -812,6 +926,13 @@ Before interview, make sure you can explain without notes:
 - [ ] Distributed tracing
 - [ ] System Design
 - [ ] Production troubleshooting
+- [ ] Go modules + MVS
+- [ ] Table-driven test + mocking + fuzzing
+- [ ] `errors.Is` / `errors.As` / `%w`
+- [ ] encoding/json (tags, streaming, custom marshal)
+- [ ] gRPC vs REST + protobuf compatibility
+- [ ] JWT / OAuth2 + password hashing
+- [ ] database/sql (pool, transaction pattern, ErrNoRows)
 
 ---
 

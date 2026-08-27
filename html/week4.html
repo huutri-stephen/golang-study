@@ -24,10 +24,14 @@
       <a href="#context">6. Context</a>
       <a href="#api">7. API Design</a>
       <a href="#idempotency">8. Idempotency</a>
+      <a href="#grpc">9. gRPC &amp; Protobuf</a>
+      <a href="#security">10. Security &amp; Auth</a>
+      <a href="#frameworks">11. Web Frameworks</a>
       <a href="#flashcards">Flashcards</a>
     </nav>
     <h2>All Weeks</h2>
     <nav>
+      <a href="week0.html">Week 0 · Foundations</a>
       <a href="week1.html">Week 1 · Go Core</a>
       <a href="week2.html">Week 2 · Concurrency</a>
       <a href="week3.html">Week 3 · Runtime</a>
@@ -446,6 +450,91 @@ srv.<span class="tok-fn">Shutdown</span>(ctx)  <span class="tok-com">// graceful
       </div>
     </section>
 
+    <!-- 9. gRPC -->
+    <section id="grpc">
+      <h2 class="section-title"><span class="num">9</span> gRPC &amp; Protobuf</h2>
+      <div class="block purpose">
+        <div class="block-label">Protobuf — binary + schema</div>
+        <p>IDL + binary serialization của Google. Nhỏ &amp; nhanh hơn JSON, có schema. Định nghĩa <code>.proto</code> → sinh code Go bằng <code>protoc</code>. <strong>Field number là hợp đồng trên wire</strong> — không đổi/không tái dùng; thêm field mới với number mới → backward compatible.</p>
+      </div>
+      <div class="grid-2">
+        <div class="col">
+          <h4>4 kiểu RPC</h4>
+          <ul style="margin-left:18px">
+            <li><strong>Unary</strong>: 1 req → 1 resp</li>
+            <li><strong>Server streaming</strong>: 1 → nhiều</li>
+            <li><strong>Client streaming</strong>: nhiều → 1</li>
+            <li><strong>Bidi streaming</strong>: nhiều ↔ nhiều (chat)</li>
+          </ul>
+        </div>
+        <div class="col">
+          <h4>Interceptor (≈ middleware)</h4>
+          <p>Dùng cho auth, logging, metrics, tracing (OTel), recovery, rate limit. <code>grpc.ChainUnaryInterceptor(...)</code>.</p>
+        </div>
+      </div>
+      <table>
+        <tr><th></th><th>gRPC</th><th>REST/JSON</th></tr>
+        <tr><td>Payload</td><td>Protobuf (binary, nhỏ)</td><td>JSON (text)</td></tr>
+        <tr><td>Transport</td><td>HTTP/2 (multiplexing)</td><td>thường HTTP/1.1</td></tr>
+        <tr><td>Streaming</td><td>Native (4 kiểu)</td><td>Hạn chế (SSE/WS)</td></tr>
+        <tr><td>Browser</td><td>Cần grpc-web/proxy</td><td>Native</td></tr>
+        <tr><td>Dùng khi</td><td>internal, low latency</td><td>public API, browser</td></tr>
+      </table>
+      <div class="block pitfall">
+        <div class="block-label">Bẫy load balancing</div>
+        <p>gRPC connection bền (HTTP/2 long-lived) → L4 LB sẽ dồn tải vào một pod. Cần <strong>client-side LB</strong> hoặc proxy L7 (Envoy). Luôn set deadline (<code>context.WithTimeout</code>) — nó được propagate xuống server và downstream.</p>
+      </div>
+    </section>
+
+    <!-- 10. SECURITY -->
+    <section id="security">
+      <h2 class="section-title"><span class="num">10</span> Security · Authentication &amp; Authorization</h2>
+      <div class="block why">
+        <div class="block-label">AuthN vs AuthZ</div>
+        <p><strong>Authentication</strong> = "Bạn là ai?" (verify danh tính). <strong>Authorization</strong> = "Bạn được làm gì?" (kiểm tra quyền). Nhắc lại: <strong>401</strong> chưa/không xác thực; <strong>403</strong> xác thực rồi nhưng không đủ quyền.</p>
+      </div>
+      <div class="block purpose">
+        <div class="block-label">JWT — stateless token</div>
+        <pre><code>header.payload.signature   <span class="tok-com">// base64url, chỉ KÝ chứ không mã hoá</span></code></pre>
+        <ul>
+          <li>Server không lưu session → verify bằng chữ ký → scale ngang tốt.</li>
+          <li>Payload ai cũng đọc được → <strong>KHÔNG để dữ liệu nhạy cảm</strong>.</li>
+          <li><strong>HS256</strong> (HMAC, secret chung) vs <strong>RS256</strong> (RSA, private ký / public verify — nhiều service).</li>
+          <li>Khó revoke trước hạn → TTL ngắn + <strong>refresh token</strong> (lưu server, revoke được).</li>
+        </ul>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Bẫy bảo mật thường gặp</div>
+        <ul>
+          <li>Verify JWT phải <strong>kiểm tra signing method</strong> (chống thuật toán "none"/confusion).</li>
+          <li>Băm mật khẩu bằng <strong>bcrypt/argon2</strong> (có salt, chậm có chủ đích) — KHÔNG MD5/SHA-256 trần.</li>
+          <li>So sánh token/HMAC bằng <code>hmac.Equal</code> / <code>subtle.ConstantTimeCompare</code> (chống timing attack).</li>
+          <li>Giới hạn body (<code>http.MaxBytesReader</code>), parameterized query (chống SQLi), CORS đúng origin.</li>
+        </ul>
+      </div>
+      <div class="block how">
+        <div class="block-label">OAuth2 / OIDC</div>
+        <p>OAuth2 = ủy quyền truy cập; OIDC = lớp authentication trên OAuth2 (thêm ID token). Flow phổ biến: <strong>Authorization Code + PKCE</strong> (web/mobile), Client Credentials (service-to-service). Đừng tự viết OAuth server — dùng provider (Keycloak/Auth0/Cognito).</p>
+      </div>
+    </section>
+
+    <!-- 11. FRAMEWORKS -->
+    <section id="frameworks">
+      <h2 class="section-title"><span class="num">11</span> Web Frameworks</h2>
+      <table>
+        <tr><th>Lựa chọn</th><th>Đặc điểm</th><th>Khi chọn</th></tr>
+        <tr><td><code>net/http</code> + ServeMux</td><td>stdlib; Go 1.22 hỗ trợ <code>GET /users/{id}</code></td><td>tối giản, ít phụ thuộc</td></tr>
+        <tr><td><strong>chi</strong></td><td>router nhẹ, 100% tương thích <code>http.Handler</code></td><td>nhẹ + idiomatic, dễ test</td></tr>
+        <tr><td><strong>Gin</strong></td><td>nhanh, ecosystem lớn, binding/validation sẵn</td><td>REST phổ biến, cần năng suất</td></tr>
+        <tr><td><strong>Echo</strong></td><td>tương tự Gin, API gọn</td><td>tương đương Gin</td></tr>
+        <tr><td><strong>Fiber</strong></td><td>trên fasthttp — rất nhanh nhưng <strong>không</strong> tương thích net/http</td><td>throughput cực cao</td></tr>
+      </table>
+      <div class="block best">
+        <div class="block-label">Quan điểm senior</div>
+        <p>Go 1.22 <code>net/http.ServeMux</code> đã có routing method+path param → nhiều project không cần framework. Chọn <strong>chi</strong> khi muốn nhẹ và giữ tương thích <code>http.Handler</code> (mọi middleware tái dùng được). Đừng chọn framework chỉ vì quen — cân nhắc coupling, khả năng test, ecosystem.</p>
+      </div>
+    </section>
+
     <!-- FLASHCARDS -->
     <section id="flashcards">
       <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
@@ -483,6 +572,21 @@ srv.<span class="tok-fn">Shutdown</span>(ctx)  <span class="tok-com">// graceful
 
       <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Triệu chứng và fix connection pool exhaustion?</span><span class="icon">+</span></div>
         <div class="a"><p>Triệu chứng: latency tăng dần, TCP TIME_WAIT nhiều, connection refused/timeout. Fix: đóng response body (nguyên nhân #1), tăng MaxConnsPerHost, set IdleConnTimeout, sửa downstream chậm (giữ connection lâu).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>gRPC vs REST — khi nào dùng cái nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>gRPC: internal service-to-service, low latency, cần streaming — payload protobuf binary trên HTTP/2. REST/JSON: public API, browser-facing, đơn giản. gRPC cần grpc-web/proxy cho browser.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao không đổi/tái dùng protobuf field number?</span><span class="icon">+</span></div>
+        <div class="a"><p>Field number là định danh trên wire (hợp đồng). Đổi/tái dùng sẽ phá backward compatibility. Thêm field mới với number mới thì vẫn tương thích ngược.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>JWT: ưu/nhược và cách revoke?</span><span class="icon">+</span></div>
+        <div class="a"><p>Ưu: stateless, scale ngang tốt (verify bằng chữ ký, không lưu session). Nhược: khó revoke trước hạn, payload đọc được (chỉ ký không mã hoá). Giải pháp revoke: TTL ngắn + refresh token lưu server, hoặc blacklist.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>HS256 vs RS256?</span><span class="icon">+</span></div>
+        <div class="a"><p>HS256: HMAC với secret chung — ký và verify cùng secret (đơn giản, nội bộ). RS256: RSA — private key ký, public key verify → nhiều service verify được mà không giữ khoá ký. Verify LUÔN kiểm tra signing method để chống thuật toán "none".</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao không hash mật khẩu bằng SHA-256 trần?</span><span class="icon">+</span></div>
+        <div class="a"><p>SHA-256 quá nhanh → brute-force/rainbow table dễ. Dùng bcrypt/argon2/scrypt: có salt và cost factor (chậm có chủ đích) chống dò mật khẩu.</p></div></div>
     </section>
 
     <div class="page-nav">

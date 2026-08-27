@@ -1,5 +1,54 @@
 # ✅ Weekly Progress Checklist
 
+## Week 0 – Foundations & Tooling
+
+### Modules & Dependency Management
+- [ ] go.mod / go.sum (checksum, supply-chain)
+- [ ] go mod tidy / download / vendor
+- [ ] Semantic versioning + `/v2` import path
+- [ ] MVS (Minimal Version Selection)
+- [ ] Go workspaces (`go work`)
+- [ ] `replace` directive
+
+### Testing (chiều sâu)
+- [ ] Table-driven tests + subtests (`t.Run`)
+- [ ] Mocking qua interface (gomock/testify/moq)
+- [ ] Coverage (`-cover`, `-coverprofile`)
+- [ ] Fuzzing (`go test -fuzz`)
+- [ ] `t.Helper()`, `t.Cleanup()`, require vs assert
+- [ ] Integration test (build tags, testcontainers)
+
+### Tooling
+- [ ] gofmt / goimports
+- [ ] go vet
+- [ ] staticcheck
+- [ ] golangci-lint (CI)
+- [ ] delve (dlv) debugger
+
+### Error Handling hiện đại
+- [ ] `fmt.Errorf` + `%w`
+- [ ] `errors.Is` vs `errors.As`
+- [ ] Sentinel vs custom error type
+- [ ] `errors.Join`
+
+### encoding/json
+- [ ] Struct tags (`-`, `omitempty`)
+- [ ] Marshal / Unmarshal / streaming Decoder
+- [ ] DisallowUnknownFields, UseNumber
+- [ ] Custom MarshalJSON
+
+### Reflection & Ecosystem
+- [ ] reflect cơ bản
+- [ ] Config (flag > env > file)
+- [ ] Structured logging (slog/zap/zerolog)
+
+### Code Examples Completed
+- [ ] error_handling.go
+- [ ] json_patterns.go
+- [ ] testing_patterns_test.go
+
+---
+
 ## Week 1 – Go Core + Memory
 
 ### Go Language Fundamentals
@@ -182,11 +231,31 @@
 - [ ] Versioning strategies
 - [ ] Rate limiting headers
 
+### gRPC & Protobuf
+- [ ] Protobuf IDL, field number compatibility
+- [ ] 4 kiểu RPC (unary, streaming)
+- [ ] gRPC vs REST trade-offs
+- [ ] Interceptor (auth, logging, tracing)
+- [ ] Deadline propagation, status codes
+
+### Security / Auth
+- [ ] AuthN vs AuthZ (401 vs 403)
+- [ ] JWT (HS256/RS256, exp, refresh token)
+- [ ] OAuth2 / OIDC (Auth Code + PKCE)
+- [ ] Password hashing (bcrypt/argon2), constant-time
+- [ ] Input validation, CORS, body size limit
+
+### Web Frameworks
+- [ ] net/http + ServeMux (Go 1.22)
+- [ ] chi / Gin / Echo / Fiber trade-offs
+
 ### Code Examples Completed
 - [ ] http_server.go
 - [ ] middleware.go
 - [ ] graceful_shutdown.go
 - [ ] context_usage.go
+- [ ] jwt_auth.go
+- [ ] payment.proto
 
 ---
 
@@ -221,10 +290,21 @@
 - [ ] Delivery semantics
 - [ ] DLQ pattern
 
+### Go Database Access
+- [ ] database/sql (pool, sql.Open lazy, Ping)
+- [ ] QueryRow/Query + Scan, sql.ErrNoRows
+- [ ] rows.Close() + rows.Err()
+- [ ] Placeholder chống SQL injection
+- [ ] Transaction: BeginTx + defer Rollback
+- [ ] Prepared statement
+- [ ] sqlx / sqlc / GORM / ent trade-offs
+- [ ] Migrations (golang-migrate/goose)
+
 ### Code Examples Completed
 - [ ] db_transaction.go
 - [ ] redis_cache.go
 - [ ] kafka_consumer.go
+- [ ] db_access_patterns.go
 
 ---
 

@@ -24,10 +24,12 @@
       <a href="#cache">6. Cache Strategies</a>
       <a href="#cacheproblems">7. Cache Problems</a>
       <a href="#kafka">8. Kafka &amp; Delivery</a>
+      <a href="#goaccess">9. Go DB Access</a>
       <a href="#flashcards">Flashcards</a>
     </nav>
     <h2>All Weeks</h2>
     <nav>
+      <a href="week0.html">Week 0 · Foundations</a>
       <a href="week1.html">Week 1 · Go Core</a>
       <a href="week2.html">Week 2 · Concurrency</a>
       <a href="week3.html">Week 3 · Runtime</a>
@@ -409,6 +411,50 @@ db.<span class="tok-fn">SetConnMaxIdleTime</span>(<span class="tok-num">1</span>
       </div>
     </section>
 
+    <!-- 9. GO DB ACCESS -->
+    <section id="goaccess">
+      <h2 class="section-title"><span class="num">9</span> Go Database Access</h2>
+      <div class="block why">
+        <div class="block-label"><code>sql.DB</code> là POOL, không phải 1 connection</div>
+        <p><code>sql.Open</code> <strong>không kết nối ngay</strong> — chỉ tạo pool (lazy). Cần <code>PingContext</code> để kiểm tra kết nối thật. Cấu hình pool: <code>SetMaxOpenConns</code>, <code>SetMaxIdleConns</code>, <code>SetConnMaxLifetime</code> (tái tạo connection cũ tránh bị LB/DB đóng ngầm).</p>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Placeholder chống SQL injection</div>
+        <pre><code>db.<span class="tok-fn">QueryRowContext</span>(ctx, <span class="tok-str">`SELECT id FROM users WHERE id = $1`</span>, id)  <span class="tok-com">// driver escape</span>
+<span class="tok-com">// KHÔNG BAO GIỜ: "... WHERE id = " + userInput  → lỗ hổng SQLi</span></code></pre>
+      </div>
+      <div class="block how">
+        <div class="block-label">Query nhiều dòng — phải Close + Err</div>
+        <pre><code>rows, err := db.<span class="tok-fn">QueryContext</span>(ctx, q, args...)
+<span class="tok-kw">if</span> err != <span class="tok-kw">nil</span> { <span class="tok-kw">return</span> err }
+<span class="tok-kw">defer</span> rows.<span class="tok-fn">Close</span>()          <span class="tok-com">// BẮT BUỘC: trả connection về pool</span>
+<span class="tok-kw">for</span> rows.<span class="tok-fn">Next</span>() {
+    rows.<span class="tok-fn">Scan</span>(&amp;u.ID, &amp;u.Email)
+}
+<span class="tok-kw">return</span> rows.<span class="tok-fn">Err</span>()          <span class="tok-com">// lỗi phát sinh giữa chừng</span></code></pre>
+      </div>
+      <div class="block best">
+        <div class="block-label">Transaction an toàn — defer Rollback</div>
+        <pre><code>tx, _ := db.<span class="tok-fn">BeginTx</span>(ctx, opts)
+<span class="tok-kw">defer</span> tx.<span class="tok-fn">Rollback</span>()   <span class="tok-com">// Commit OK → no-op; return sớm → tự rollback (không leak tx)</span>
+tx.<span class="tok-fn">ExecContext</span>(ctx, <span class="tok-str">`UPDATE ... balance-$1`</span>, amt, from)
+tx.<span class="tok-fn">ExecContext</span>(ctx, <span class="tok-str">`UPDATE ... balance+$1`</span>, amt, to)
+<span class="tok-kw">return</span> tx.<span class="tok-fn">Commit</span>()</code></pre>
+        <p>Map <code>sql.ErrNoRows</code> sang lỗi domain bằng <code>errors.Is(err, sql.ErrNoRows)</code>.</p>
+      </div>
+      <table>
+        <tr><th>Thư viện</th><th>Kiểu</th><th>Ưu / Nhược</th></tr>
+        <tr><td><code>database/sql</code></td><td>stdlib</td><td>kiểm soát tối đa / nhiều boilerplate</td></tr>
+        <tr><td><strong>sqlx</strong></td><td>mở rộng</td><td>StructScan tiện / vẫn viết SQL tay</td></tr>
+        <tr><td><strong>sqlc</strong></td><td>codegen từ SQL</td><td>type-safe, không reflection / thêm bước sinh code</td></tr>
+        <tr><td><strong>GORM</strong></td><td>ORM đầy đủ</td><td>nhanh viết / reflection chậm, dễ N+1, query ẩn</td></tr>
+      </table>
+      <div class="block purpose">
+        <div class="block-label">Migrations</div>
+        <p>golang-migrate / goose / atlas — file SQL có version (up/down). Quy tắc rolling deploy: migration <strong>backward-compatible</strong> (thêm cột nullable → backfill → mới enforce NOT NULL) để tránh downtime. Tránh <code>AutoMigrate</code> của GORM ở production.</p>
+      </div>
+    </section>
+
     <!-- FLASHCARDS -->
     <section id="flashcards">
       <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
@@ -452,6 +498,18 @@ db.<span class="tok-fn">SetConnMaxIdleTime</span>(<span class="tok-num">1</span>
 
       <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao Redis nhanh dù single-threaded? Hệ quả?</span><span class="icon">+</span></div>
         <div class="a"><p>Một luồng → không lock, mọi command atomic. Nhanh nhờ in-memory + cấu trúc tối ưu + epoll. Hệ quả: command O(n) nặng (KEYS *) chặn cả server → tránh trong production, dùng SCAN thay thế.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>sql.DB là 1 connection hay pool?</span><span class="icon">+</span></div>
+        <div class="a"><p>Là POOL (safe cho concurrent). sql.Open không kết nối ngay (lazy) — cần PingContext để kiểm tra thật. Cấu hình SetMaxOpenConns/SetMaxIdleConns/SetConnMaxLifetime. Không cần tự pool thêm.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Pattern transaction an toàn trong Go?</span><span class="icon">+</span></div>
+        <div class="a"><p>BeginTx rồi <code>defer tx.Rollback()</code> ngay. Commit thành công thì Rollback là no-op; return sớm vì lỗi thì tự rollback → không bao giờ leak tx/connection.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Chống SQL injection trong Go?</span><span class="icon">+</span></div>
+        <div class="a"><p>Luôn dùng placeholder ($1 Postgres, ? MySQL) — driver tự escape. KHÔNG BAO GIỜ nối chuỗi input vào query. Ngoài ra defer rows.Close() và kiểm tra rows.Err() để tránh leak/bỏ sót lỗi.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>sqlx/sqlc vs GORM — chọn thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>sqlx/sqlc: SQL tường minh, kiểm soát hiệu năng, sqlc type-safe không reflection. GORM: nhanh viết CRUD nhưng reflection (chậm), query sinh tự động khó tối ưu, dễ N+1. Hot path → ưu tiên SQL tường minh.</p></div></div>
     </section>
 
     <div class="page-nav">

@@ -297,3 +297,115 @@ rows, _ := db.Query(`
 userIDs := getIDs(users)
 orders, _ := db.Query("SELECT * FROM orders WHERE user_id IN (?)", userIDs)
 ```
+
+---
+
+## 7. Go Database Access (database/sql, sqlx, GORM, sqlc)
+
+> Plan gốc phủ lý thuyết SQL nhưng thiếu phần **code Go tương tác DB** — thứ trực tiếp bị hỏi/coding.
+
+### database/sql (stdlib) — nền tảng
+
+`database/sql` là lớp trừu tượng chung; cắm driver cụ thể (đăng ký qua `import _`):
+
+```go
+import (
+    "database/sql"
+    _ "github.com/jackc/pgx/v5/stdlib" // hoặc lib/pq, go-sql-driver/mysql
+)
+
+db, err := sql.Open("pgx", dsn) // KHÔNG mở connection ngay — chỉ tạo pool (lazy)
+defer db.Close()
+db.PingContext(ctx)             // ping để thực sự kiểm tra kết nối
+```
+
+**`sql.DB` là một connection POOL** (safe cho concurrent), không phải 1 connection. Cấu hình pool (xem mục 3).
+
+### Query & Scan
+
+```go
+// Query một dòng
+var u User
+err := db.QueryRowContext(ctx,
+    `SELECT id, email FROM users WHERE id = $1`, id).
+    Scan(&u.ID, &u.Email)
+if errors.Is(err, sql.ErrNoRows) {   // "not found" -> dùng errors.Is
+    return ErrNotFound
+}
+
+// Query nhiều dòng — PHẢI đóng rows để trả connection về pool
+rows, err := db.QueryContext(ctx, `SELECT id, email FROM users WHERE active = $1`, true)
+if err != nil { return err }
+defer rows.Close()                    // BẮT BUỘC (giống resp.Body.Close)
+for rows.Next() {
+    var u User
+    if err := rows.Scan(&u.ID, &u.Email); err != nil { return err }
+    users = append(users, u)
+}
+return rows.Err()                     // kiểm tra lỗi xảy ra giữa chừng
+```
+
+### Placeholder & SQL Injection
+
+- **LUÔN dùng placeholder** (`$1` Postgres, `?` MySQL) — driver tự escape → chống SQL injection.
+- **KHÔNG BAO GIỜ** nối chuỗi: `"...WHERE id = " + userInput` ← lỗ hổng nghiêm trọng.
+- `Exec` cho INSERT/UPDATE/DELETE; `Query`/`QueryRow` cho SELECT.
+
+### Prepared Statement
+
+```go
+stmt, _ := db.PrepareContext(ctx, `INSERT INTO logs(msg) VALUES($1)`)
+defer stmt.Close()
+for _, m := range msgs { stmt.ExecContext(ctx, m) } // tái dùng plan, tránh parse lại
+```
+
+### Transaction trong Go
+
+```go
+tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+if err != nil { return err }
+defer tx.Rollback() // no-op nếu đã Commit — pattern an toàn chống quên rollback
+
+if _, err = tx.ExecContext(ctx, `UPDATE accounts SET balance=balance-$1 WHERE id=$2`, amt, from); err != nil {
+    return err // defer Rollback() chạy
+}
+if _, err = tx.ExecContext(ctx, `UPDATE accounts SET balance=balance+$1 WHERE id=$2`, amt, to); err != nil {
+    return err
+}
+return tx.Commit()
+```
+
+**Pattern quan trọng:** `defer tx.Rollback()` ngay sau BeginTx. Nếu Commit thành công thì Rollback là no-op; nếu return sớm vì lỗi thì tự rollback → không bao giờ để tx treo (leak connection).
+
+### So sánh các lựa chọn
+
+| Thư viện | Kiểu | Ưu | Nhược |
+|---|---|---|---|
+| `database/sql` | thuần stdlib | không magic, kiểm soát tối đa | scan thủ công, nhiều boilerplate |
+| **sqlx** | mở rộng database/sql | `StructScan`, `Get`, `Select` map vào struct | vẫn viết SQL tay (đây thường là ưu điểm) |
+| **sqlc** | sinh code từ SQL | viết SQL → sinh Go **type-safe**, không reflection | thêm bước codegen |
+| **GORM** | ORM đầy đủ | nhanh viết, migration, association | reflection (chậm), query ẩn khó tối ưu, dễ N+1 |
+| **ent** | ORM/graph (Meta) | type-safe, schema-as-code, sinh code | learning curve |
+
+**Quan điểm senior:** dự án cần kiểm soát hiệu năng → `sqlx`/`sqlc` (SQL tường minh). GORM phù hợp CRUD nhanh nhưng cẩn thận N+1 và query sinh tự động. Tránh phụ thuộc ORM che giấu SQL trong hot path.
+
+### Migrations
+
+- Công cụ: **golang-migrate**, **goose**, **atlas**. Migration = file SQL có version (up/down).
+
+```
+migrations/
+  001_create_users.up.sql     001_create_users.down.sql
+  002_add_index.up.sql        002_add_index.down.sql
+```
+
+- Chạy tự động lúc deploy hoặc bằng job riêng. **Quy tắc:** migration phải **backward-compatible** khi rolling deploy (thêm cột nullable trước, backfill, rồi mới enforce NOT NULL) để tránh downtime.
+- Tránh `AutoMigrate` của GORM ở production — khó kiểm soát, dễ khoá bảng lớn.
+
+### Bẫy hay gặp (interview)
+
+- Quên `rows.Close()` / `rows.Err()` → connection leak, bỏ sót lỗi.
+- Dùng `db.Query` trong vòng lặp → N+1 (xem mục 6). Dùng JOIN hoặc `IN (...)`.
+- `sql.Open` không kết nối ngay → phải `Ping` để phát hiện config sai sớm.
+- Không set `SetConnMaxLifetime` → connection cũ bị DB/LB đóng ngầm gây lỗi "connection reset".
+- Nhầm `sql.DB` là 1 connection — thực ra là pool, không cần tự pool thêm.

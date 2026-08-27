@@ -8,6 +8,13 @@ study/
 ├── senior_backend_golang_interview_plan.md # Master plan
 ├── checklist/
 │   └── weekly_checklist.md                # Weekly progress tracking
+├── week0-foundations-tooling/             # Nền tảng ecosystem (bổ sung theo roadmap.sh)
+│   ├── notes.md                           # Modules, testing, tooling, errors, json, reflection
+│   ├── flashcards.md
+│   └── code_examples/
+│       ├── error_handling.go              # errors.Is/As, %w, custom error
+│       ├── json_patterns.go               # tags, streaming, custom marshal
+│       └── testing_patterns_test.go       # table-driven, mock, fuzzing
 ├── week1-go-core-memory/
 │   ├── notes.md                           # Study notes chi tiết
 │   ├── flashcards.md                      # Q&A flashcards
@@ -39,14 +46,17 @@ study/
 │       ├── http_server.go
 │       ├── middleware.go
 │       ├── graceful_shutdown.go
-│       └── context_usage.go
+│       ├── context_usage.go
+│       ├── jwt_auth.go                     # JWT sign/verify + auth middleware
+│       └── payment.proto                   # gRPC/Protobuf IDL mẫu
 ├── week5-database-redis-messaging/
 │   ├── notes.md
 │   ├── flashcards.md
 │   └── code_examples/
 │       ├── db_transaction.go
 │       ├── redis_cache.go
-│       └── kafka_consumer.go
+│       ├── kafka_consumer.go
+│       └── db_access_patterns.go           # database/sql pool, scan, tx pattern
 ├── week6-distributed-systems/
 │   ├── notes.md
 │   ├── flashcards.md

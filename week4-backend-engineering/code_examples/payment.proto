@@ -1,0 +1,43 @@
+// Protobuf IDL mẫu cho gRPC PaymentService.
+// Sinh code Go:
+//   protoc --go_out=. --go-grpc_out=. payment.proto
+// (cần protoc + protoc-gen-go + protoc-gen-go-grpc)
+
+syntax = "proto3";
+
+package payment.v1;
+
+option go_package = "github.com/acme/payment/gen/paymentv1";
+
+// Field number (= 1, = 2...) là HỢP ĐỒNG trên wire.
+// KHÔNG đổi/không tái dùng number cũ. Thêm field mới = number mới -> backward compatible.
+message ChargeRequest {
+  string idempotency_key = 1;
+  int64  amount_cents    = 2;
+  string currency        = 3;
+  string customer_id     = 4;
+}
+
+message ChargeResponse {
+  string payment_id = 1;
+  Status status     = 2;
+
+  enum Status {
+    STATUS_UNSPECIFIED = 0; // proto3: enum PHẢI có giá trị 0 làm default
+    PENDING            = 1;
+    SUCCEEDED          = 2;
+    FAILED             = 3;
+  }
+}
+
+message GetStatusRequest {
+  string payment_id = 1;
+}
+
+service PaymentService {
+  // Unary: 1 request -> 1 response
+  rpc Charge(ChargeRequest) returns (ChargeResponse);
+
+  // Server streaming: theo dõi trạng thái thay đổi
+  rpc StreamStatus(GetStatusRequest) returns (stream ChargeResponse);
+}

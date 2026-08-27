@@ -317,3 +317,157 @@ func (h *Handler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 | 502 | Bad Gateway | Upstream service error |
 | 503 | Service Unavailable | Server overloaded/maintenance |
 | 504 | Gateway Timeout | Upstream timeout |
+
+---
+
+## 7. gRPC & Protobuf
+
+> roadmap.sh liệt kê gRPC như kỹ năng cốt lõi của Go backend. Plan gốc chỉ nói chung "service-to-service".
+> Đây là phần rất hay hỏi cho microservices Go.
+
+### Protobuf (Protocol Buffers)
+
+- IDL (Interface Definition Language) + binary serialization format của Google.
+- Nhỏ hơn và nhanh hơn JSON nhiều (binary, có schema, không lặp field name).
+- Định nghĩa `.proto` → sinh code Go bằng `protoc` + `protoc-gen-go` / `protoc-gen-go-grpc`.
+
+```protobuf
+syntax = "proto3";
+package payment.v1;
+option go_package = "github.com/acme/payment/gen/paymentv1";
+
+message ChargeRequest {
+  string idempotency_key = 1;   // field number: định danh trên wire, KHÔNG đổi
+  int64  amount_cents    = 2;
+  string currency        = 3;
+}
+message ChargeResponse {
+  string payment_id = 1;
+  string status     = 2;
+}
+
+service PaymentService {
+  rpc Charge(ChargeRequest) returns (ChargeResponse);            // unary
+  rpc StreamStatus(ChargeRequest) returns (stream ChargeResponse); // server streaming
+}
+```
+
+**Quy tắc tương thích:** field number là hợp đồng trên wire — **không đổi/không tái dùng**. Thêm field mới với number mới → backward compatible. Đây là lý do protobuf tốt cho API tiến hoá dần.
+
+### 4 kiểu RPC
+
+| Kiểu | Mô tả | Ví dụ |
+|---|---|---|
+| Unary | 1 request → 1 response | Charge |
+| Server streaming | 1 request → nhiều response | tail log, progress |
+| Client streaming | nhiều request → 1 response | upload chunk |
+| Bidirectional streaming | nhiều ↔ nhiều | chat, real-time |
+
+### gRPC vs REST
+
+| | gRPC | REST/JSON |
+|---|---|---|
+| Payload | Protobuf (binary, nhỏ) | JSON (text, lớn hơn) |
+| Transport | HTTP/2 (multiplexing, stream) | thường HTTP/1.1 |
+| Contract | `.proto` strict, sinh code | OpenAPI (tùy chọn) |
+| Streaming | Native (4 kiểu) | Hạn chế (SSE/WebSocket) |
+| Browser | Cần grpc-web/proxy | Native |
+| Dùng khi | internal service-to-service, low latency | public API, browser, đơn giản |
+
+### Interceptor (≈ middleware của gRPC)
+
+```go
+func UnaryLogging(ctx context.Context, req any, info *grpc.UnaryServerInfo,
+    handler grpc.UnaryHandler) (any, error) {
+    start := time.Now()
+    resp, err := handler(ctx, req)              // gọi handler thật
+    log.Printf("%s took %v err=%v", info.FullMethod, time.Since(start), err)
+    return resp, err
+}
+// server := grpc.NewServer(grpc.ChainUnaryInterceptor(UnaryLogging, UnaryAuth, UnaryRecovery))
+```
+
+Dùng interceptor cho: logging, auth, metrics, tracing (OpenTelemetry), panic recovery, rate limit — giống middleware HTTP.
+
+### Điểm cần nắm cho interview
+
+- gRPC dùng **HTTP/2** → multiplexing nhiều RPC trên 1 connection, không HOL blocking ở tầng ứng dụng.
+- **Deadline propagation**: client set deadline → truyền qua context xuống server và downstream. Luôn dùng `context.WithTimeout` khi gọi.
+- Status code riêng (`codes.NotFound`, `codes.DeadlineExceeded`, `codes.Unavailable`...) — map sang HTTP khi cần.
+- Load balancing: gRPC connection bền (long-lived) → cần L7 LB (client-side LB, hoặc proxy như Envoy) chứ L4 LB sẽ dồn tải một pod.
+
+---
+
+## 8. Security / Authentication & Authorization
+
+> Plan gốc mới có TLS. Auth là chủ đề gần như luôn xuất hiện trong backend interview.
+
+### Authentication vs Authorization
+
+- **Authentication (AuthN):** "Bạn là ai?" → verify danh tính (login, token).
+- **Authorization (AuthZ):** "Bạn được làm gì?" → kiểm tra quyền (RBAC/ABAC).
+- Nhắc lại: **401** = chưa/không xác thực được; **403** = xác thực rồi nhưng không đủ quyền.
+
+### JWT (JSON Web Token)
+
+```
+header.payload.signature   (base64url, phân cách bằng dấu chấm)
+```
+
+- **Stateless**: server không lưu session, verify bằng chữ ký. Scale ngang tốt.
+- Payload (claims) chứa `sub`, `exp`, `iat`, `roles`... — **KHÔNG chứa dữ liệu nhạy cảm** vì chỉ base64, ai cũng đọc được (không mã hoá, chỉ ký).
+- Ký bằng **HS256** (HMAC, secret chung) hoặc **RS256** (RSA, private ký / public verify — phù hợp nhiều service).
+- **Nhược điểm:** khó thu hồi (revoke) trước khi hết hạn → dùng TTL ngắn + **refresh token** (lưu server, revoke được).
+
+```go
+// Ký
+tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+    "sub": userID, "exp": time.Now().Add(15 * time.Minute).Unix(),
+})
+signed, _ := tok.SignedString([]byte(secret))
+
+// Verify (LUÔN kiểm tra signing method để chống thuật toán "none" / confusion attack)
+parsed, err := jwt.Parse(signed, func(t *jwt.Token) (any, error) {
+    if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+        return nil, errors.New("unexpected signing method")
+    }
+    return []byte(secret), nil
+})
+```
+
+### OAuth2 / OIDC (tóm tắt)
+
+- **OAuth2** = ủy quyền truy cập (authorization framework); **OIDC** = lớp authentication trên OAuth2 (thêm ID token).
+- Flow phổ biến: **Authorization Code + PKCE** (web/mobile), Client Credentials (service-to-service).
+- Đừng tự viết OAuth server — dùng provider (Auth0/Keycloak/Cognito) hoặc lib chuẩn.
+
+### Password & Secrets
+
+- Băm mật khẩu bằng **bcrypt / argon2 / scrypt** (có salt, chậm có chủ đích). **KHÔNG** dùng MD5/SHA-256 trần.
+- So sánh token/HMAC bằng **`hmac.Equal` / `subtle.ConstantTimeCompare`** để chống timing attack.
+- Secret qua env/secret manager (Vault, AWS Secrets Manager), không commit.
+
+### Checklist bảo mật API
+
+- [ ] TLS bắt buộc (HSTS), redirect HTTP→HTTPS.
+- [ ] Validate & sanitize input; parameterized query (chống SQL injection).
+- [ ] Giới hạn body size (`http.MaxBytesReader`), rate limit, timeout.
+- [ ] CORS đúng origin, không `*` cho endpoint có credential.
+- [ ] Không log secret/token/PII; header bảo mật (CSP, X-Content-Type-Options).
+- [ ] Auth middleware đặt sát handler, sau RequestID/Recovery/RateLimit.
+
+---
+
+## 9. Web Frameworks (net/http vs Gin/Echo/chi/Fiber)
+
+> Interview hay hỏi "dùng framework nào, vì sao". Cần giải thích trade-off, không cần thuộc API.
+
+| | Đặc điểm | Khi chọn |
+|---|---|---|
+| `net/http` (+ ServeMux 1.22) | stdlib, không dependency; Go 1.22 thêm routing method+path param | thích tối giản, ít phụ thuộc |
+| **chi** | router nhẹ, 100% tương thích `http.Handler`, middleware chuẩn stdlib | muốn nhẹ + idiomatic, dễ test |
+| **Gin** | nhanh, hệ sinh thái lớn, context riêng, binding/validation sẵn | REST API phổ biến, cần năng suất |
+| **Echo** | tương tự Gin, API gọn, nhiều middleware | tương đương Gin |
+| **Fiber** | trên fasthttp (không phải net/http) → rất nhanh nhưng **không tương thích** ecosystem net/http | cần throughput cực cao, chấp nhận đánh đổi |
+
+**Quan điểm senior:** Go 1.22 `net/http.ServeMux` đã hỗ trợ `GET /users/{id}` → nhiều project không cần framework. Chọn `chi` khi muốn nhẹ và giữ tương thích `http.Handler` (mọi middleware tái dùng được). Tránh chọn framework chỉ vì quen — cân nhắc coupling, khả năng test, và ecosystem.
