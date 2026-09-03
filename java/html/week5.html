@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 5 – JVM, Memory &amp; GC (Deep Dive) | Senior Java</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Java knowledge</div></a>
+      <div class="sub">Deep Dive</div>
+    </div>
+    <h2>Week 5 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#arch">1. JVM architecture</a>
+      <a href="#loading">2. Class loading</a>
+      <a href="#delegation">3. ClassLoader delegation</a>
+      <a href="#areas">4. Runtime data areas</a>
+      <a href="#tlab">5. Allocation: TLAB</a>
+      <a href="#gc">6. GC nền tảng</a>
+      <a href="#g1">7. G1 chi tiết</a>
+      <a href="#zgc">8. ZGC</a>
+      <a href="#refleak">9. Reference &amp; leak</a>
+      <a href="#trouble">10. Troubleshooting</a>
+      <a href="#followup">11. Follow-up</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html">Week 1 · Core &amp; OOP</a>
+      <a href="week2.html">Week 2 · Generics/Collections</a>
+      <a href="week3.html">Week 3 · Functional/Streams</a>
+      <a href="week4.html">Week 4 · Concurrency</a>
+      <a href="week5.html" class="active">Week 5 · JVM/GC</a>
+      <a href="week6.html">Week 6 · Modern Java/IO</a>
+      <a href="week7.html">Week 7 · Build/Testing</a>
+      <a href="week8.html">Week 8 · Spring/Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 5 · Deep Dive</span>
+      <h1>JVM, Memory &amp; Garbage Collection</h1>
+      <p>Điểm phân biệt senior rõ nhất: class loading + linking chi tiết, TLAB, card table, các pha của G1 và ZGC, và quy trình chẩn đoán production OOM/GC.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★★</b><span>Priority</span></div>
+        <div class="item"><b>10</b><span>Chủ đề</span></div>
+        <div class="item"><b>~10h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <div class="tldr">
+        <div class="label">TL;DR</div>
+        <ul>
+          <li>Class loading: Loading → Linking (verify/prepare/resolve) → Initialization; lazy.</li>
+          <li>Parent delegation: App→Platform→Bootstrap; 2 loader = 2 class.</li>
+          <li>TLAB: cấp phát không đồng bộ trong Eden; escape analysis → scalar replacement.</li>
+          <li>Card table: theo dõi reference old→young để minor GC không quét cả old.</li>
+          <li>G1 (mặc định) region-based; ZGC pause &lt;1ms (colored pointer + load barrier).</li>
+          <li>Leak dù có GC = reachable nhưng không cần (static/ThreadLocal/classloader).</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="arch">
+      <h2 class="section-title"><span class="num">1</span> JVM architecture</h2>
+      <div class="dg">
+        <div class="dg-title">.java → bytecode → JVM</div>
+        <div class="dg-row scroll">
+          <div class="node muted">.class</div>
+          <div class="arrow-h acc"></div>
+          <div class="node accent">ClassLoader</div>
+          <div class="arrow-h acc"></div>
+          <div class="node green">Runtime Data Areas</div>
+          <div class="arrow-h acc"></div>
+          <div class="node orange">Execution Engine<div class="sub">interpreter + JIT + GC</div></div>
+        </div>
+      </div>
+      <div class="block how">
+        <div class="block-label">JIT tiered compilation</div>
+        <p>Level 0 interpreter → C1 (level 1-3, biên dịch nhanh + profiling) → C2 (level 4, tối ưu sâu: inlining, escape analysis, loop unrolling). Method "nóng" (đếm invocation/loop back-edge vượt ngưỡng) được nâng cấp dần.</p>
+      </div>
+    </section>
+
+    <section id="loading">
+      <h2 class="section-title"><span class="num">2</span> Class loading: 5 bước</h2>
+      <div class="dg">
+        <div class="dg-title">Loading → Linking(3) → Initialization</div>
+        <div class="dg-row scroll">
+          <div class="node accent">Loading<div class="sub">đọc .class</div></div>
+          <div class="arrow-h acc"></div>
+          <div class="node orange">Verification<div class="sub">bytecode an toàn</div></div>
+          <div class="node orange">Preparation<div class="sub">static = default</div></div>
+          <div class="node orange">Resolution<div class="sub">symbolic→direct</div></div>
+          <div class="arrow-h acc"></div>
+          <div class="node green">Initialization<div class="sub">&lt;clinit&gt;</div></div>
+        </div>
+        <div class="dg-note">Lazy: init khi lần đầu chủ động dùng (new, gọi static non-final, reflection).</div>
+      </div>
+      <div class="block how">
+        <div class="block-label">&lt;clinit&gt; thread-safe → holder idiom</div>
+        <pre><code><span class="tok-kw">class</span> Singleton {
+    <span class="tok-kw">private static class</span> Holder { <span class="tok-kw">static final</span> Singleton INSTANCE = <span class="tok-kw">new</span> Singleton(); }
+    <span class="tok-kw">static</span> Singleton <span class="tok-fn">get</span>() { <span class="tok-kw">return</span> Holder.INSTANCE; }  <span class="tok-com">// Holder init khi get() lần đầu</span>
+}</code></pre>
+        <p>JVM đảm bảo <code>&lt;clinit&gt;</code> chạy đúng 1 lần (lock trên Class) → lazy singleton không cần volatile/synchronized.</p>
+      </div>
+      <div class="block pitfall"><div class="block-label">static final constant không kích hoạt init</div><p><code>static final int B = 10</code> (hằng compile-time) được inline vào call site → không kích hoạt <code>&lt;clinit&gt;</code>. Truy cập static field non-final thì có.</p></div>
+    </section>
+
+    <section id="delegation">
+      <h2 class="section-title"><span class="num">3</span> ClassLoader &amp; parent delegation</h2>
+      <div class="dg">
+        <div class="dg-title">Ủy quyền lên cha trước</div>
+        <div class="dg-row scroll">
+          <div class="node accent">Bootstrap<div class="sub">java.base, java.lang.*</div></div>
+          <div class="arrow-h grn rev"></div>
+          <div class="node">Platform<div class="sub">JDK modules</div></div>
+          <div class="arrow-h grn rev"></div>
+          <div class="node">Application<div class="sub">classpath của bạn</div></div>
+          <div class="arrow-h grn rev"></div>
+          <div class="node muted">Custom</div>
+        </div>
+      </div>
+      <div class="block why"><div class="block-label">Vì sao delegation</div><p>Loader hỏi cha trước; chỉ tự load nếu cha không tìm thấy. Đảm bảo <code>java.lang.String</code> luôn do bootstrap load (chống giả mạo + tránh trùng). Hai class <b>cùng tên khác ClassLoader = hai class khác nhau</b> (nguồn ClassCastException khó hiểu + classloader leak).</p></div>
+    </section>
+
+    <section id="areas">
+      <h2 class="section-title"><span class="num">4</span> Runtime data areas</h2>
+      <table>
+        <tr><th>Vùng</th><th>Phạm vi</th><th>Lưu</th><th>Lỗi khi đầy</th></tr>
+        <tr><td>Heap</td><td>toàn JVM</td><td>object, mảng</td><td>OOM: Java heap space</td></tr>
+        <tr><td>JVM Stack</td><td>mỗi thread</td><td>frame: biến local, operand stack</td><td>StackOverflowError</td></tr>
+        <tr><td>Metaspace</td><td>toàn JVM</td><td>metadata class (native memory)</td><td>OOM: Metaspace</td></tr>
+        <tr><td>PC Register</td><td>mỗi thread</td><td>địa chỉ lệnh đang chạy</td><td>—</td></tr>
+      </table>
+      <div class="block why"><div class="block-label">Metaspace vs PermGen</div><p>Metaspace (J8+) ở <b>native memory</b>, tự grow (giới hạn MaxMetaspaceSize). PermGen cũ ở trong heap, cố định, hay gây OOM: PermGen. String pool chuyển từ PermGen sang heap ở J7.</p></div>
+    </section>
+
+    <section id="tlab">
+      <h2 class="section-title"><span class="num">5</span> Object allocation: TLAB</h2>
+      <div class="block how">
+        <div class="block-label">Thread-Local Allocation Buffer</div>
+        <p>Heap cấp phát bằng <b>bump-the-pointer</b> (tăng con trỏ trong Eden) — rất nhanh. Nhiều thread cùng cấp phát sẽ tranh con trỏ → mỗi thread có <b>TLAB</b> (vùng riêng trong Eden) cấp phát không cần đồng bộ. Hết TLAB thì xin block mới (hiếm).</p>
+      </div>
+      <div class="block best"><div class="block-label">Escape analysis + scalar replacement</div><p>JIT phân tích nếu object không thoát khỏi method → có thể không cấp trên heap mà tách thành biến trên stack (scalar replacement) → giảm áp lực GC, đôi khi bỏ luôn lock (lock elision).</p></div>
+    </section>
+
+    <section id="gc">
+      <h2 class="section-title"><span class="num">6</span> GC nền tảng</h2>
+      <div class="block purpose"><div class="block-label">Reachability, không reference counting</div><p>Từ <b>GC roots</b> (biến local stack, static field, JNI ref, active thread, monitor) đi theo reference đánh dấu object reachable; không reachable là rác. Không reference counting vì không xử lý được tham chiếu vòng (A↔B).</p></div>
+      <div class="dg">
+        <div class="dg-title">Generational heap</div>
+        <div class="dg-row scroll">
+          <div class="dg-group"><div class="grp-label">Young Gen</div>
+            <div class="dg-row"><div class="node sm green">Eden</div><div class="node sm">S0</div><div class="node sm">S1</div></div>
+          </div>
+          <div class="arrow-h"><span class="arrow-lbl">promote</span></div>
+          <div class="dg-group"><div class="grp-label">Old Gen</div><div class="node orange">object sống lâu</div></div>
+        </div>
+        <div class="dg-note">Object mới → Eden. Minor GC copy sống sót sang survivor, tăng age; qua ngưỡng → promote lên old. Major/Full GC dọn old (đắt hơn).</div>
+      </div>
+      <div class="block how"><div class="block-label">Card table (vì sao minor GC không quét cả old)</div><p>Object old trỏ tới object young → minor GC làm sao biết young đó còn sống? Chia old thành <b>card</b> (512B); <b>write barrier</b> đánh dấu card "dirty" khi ghi reference old→young. Minor GC chỉ quét card dirty. G1 dùng <b>remembered set</b> per-region tương tự.</p></div>
+    </section>
+
+    <section id="g1">
+      <h2 class="section-title"><span class="num">7</span> G1 chi tiết</h2>
+      <div class="block purpose"><div class="block-label">Region-based</div><p>Heap chia ~2048 <b>region</b> đều (1-32MB), vai trò linh hoạt (Eden/Survivor/Old/<b>Humongous</b> ≥ 1/2 region). "Garbage First": ưu tiên thu region <b>nhiều rác nhất</b> để tối đa bộ nhớ thu / pause target.</p></div>
+      <div class="dg">
+        <div class="dg-title">3 loại thu gom</div>
+        <div class="dg-row scroll">
+          <div class="node accent">Young GC<div class="sub">STW, Eden+Survivor</div></div>
+          <div class="node green">Concurrent mark<div class="sub">old song song, SATB</div></div>
+          <div class="node orange">Mixed GC<div class="sub">STW, young + old rác nhất</div></div>
+        </div>
+        <div class="dg-note"><code>-XX:MaxGCPauseMillis=200</code> (mặc định): G1 chọn số region thu vừa đủ để đạt target. Cân bằng throughput/latency.</div>
+      </div>
+    </section>
+
+    <section id="zgc">
+      <h2 class="section-title"><span class="num">8</span> ZGC &amp; low-latency</h2>
+      <div class="block how"><div class="block-label">Pause &lt;1ms</div><p>Mục tiêu pause dưới 1ms, gần như không phụ thuộc heap size (kể cả nhiều TB). Kỹ thuật: <b>colored pointers</b> (nhét metadata GC vào bit con trỏ 64-bit) + <b>load barrier</b> (khi đọc reference, kiểm/relocate object đang di chuyển) → hầu hết GC chạy concurrent, chỉ vài pha STW cực ngắn.</p></div>
+      <table>
+        <tr><th>Collector</th><th>Ưu tiên</th><th>Pause</th><th>Dùng khi</th></tr>
+        <tr><td>Parallel</td><td>throughput</td><td>cao (STW)</td><td>batch job</td></tr>
+        <tr><td>G1</td><td>cân bằng</td><td>vài chục-trăm ms</td><td>mặc định, đa số service</td></tr>
+        <tr><td>ZGC/Shenandoah</td><td>latency</td><td>&lt;1-10ms</td><td>heap lớn, low-latency</td></tr>
+      </table>
+    </section>
+
+    <section id="refleak">
+      <h2 class="section-title"><span class="num">9</span> Reference types &amp; memory leak</h2>
+      <table>
+        <tr><th>Loại</th><th>GC thu khi</th><th>Dùng</th></tr>
+        <tr><td>Strong</td><td>không (khi còn ref)</td><td>mặc định</td></tr>
+        <tr><td>Soft</td><td>sắp thiếu bộ nhớ</td><td>cache</td></tr>
+        <tr><td>Weak</td><td>GC kế nếu chỉ còn weak</td><td>WeakHashMap</td></tr>
+        <tr><td>Phantom</td><td>sau finalize, enqueue</td><td>cleanup off-heap</td></tr>
+      </table>
+      <div class="block pitfall">
+        <div class="block-label">Leak dù có GC (reachable nhưng không cần)</div>
+        <ul>
+          <li>Static collection giữ mãi (cache không evict).</li>
+          <li>Listener/callback không hủy đăng ký.</li>
+          <li><b>ThreadLocal</b> không remove() trong thread pool (ThreadLocalMap value là STRONG ref, thread sống mãi → giữ value).</li>
+          <li>Key HashMap sai equals/hashCode hoặc mutable key.</li>
+          <li><b>ClassLoader leak</b>: giữ reference tới class của classloader (redeploy) → cả classloader + class không unload → Metaspace phình.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="trouble">
+      <h2 class="section-title"><span class="num">10</span> Tuning &amp; troubleshooting</h2>
+      <pre><code>-Xms4g -Xmx4g                 <span class="tok-com"># heap min=max (tránh resize)</span>
+-XX:+UseG1GC                  <span class="tok-com"># chọn collector</span>
+-Xlog:gc*:file=gc.log:time    <span class="tok-com"># GC log</span>
+-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/var/dumps</code></pre>
+      <table>
+        <tr><th>OOM</th><th>Nguyên nhân</th></tr>
+        <tr><td>Java heap space</td><td>object quá nhiều / leak</td></tr>
+        <tr><td>GC overhead limit exceeded</td><td>GC chạy mãi thu được ít</td></tr>
+        <tr><td>Metaspace</td><td>nạp quá nhiều class (proxy, redeploy)</td></tr>
+        <tr><td>unable to create native thread</td><td>quá nhiều thread</td></tr>
+        <tr><td>Direct buffer memory</td><td>NIO off-heap</td></tr>
+      </table>
+      <div class="block best">
+        <div class="block-label">Quy trình chẩn đoán production</div>
+        <ol style="margin-left:18px">
+          <li>Xác nhận triệu chứng (latency/OOM/CPU) → xem GC log + metrics.</li>
+          <li>GC pause cao → phân tích GC log; full GC liên tục ⇒ nghi leak/heap nhỏ.</li>
+          <li>Heap tăng dần → heap dump (<code>jmap -dump:live</code>) → Eclipse MAT (Leak Suspects, dominator tree).</li>
+          <li>CPU cao/treo → <code>jstack</code> nhiều lần; <code>top -H</code> map nid → thread; async-profiler.</li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="followup">
+      <h2 class="section-title"><span class="num">11</span> Follow-up questions</h2>
+      <div class="block purpose">
+        <div class="block-label">Interviewer hay đào tiếp</div>
+        <ul>
+          <li>5 bước class loading? → Loading, Verification, Preparation (default), Resolution, Initialization.</li>
+          <li>static final constant có init class không? → không, inline compile-time.</li>
+          <li>Parent delegation để làm gì? → chống giả mạo class core; 2 loader = 2 class.</li>
+          <li>TLAB giải quyết gì? → cấp phát không đồng bộ trong Eden.</li>
+          <li>Card table dùng làm gì? → theo dõi reference old→young qua write barrier.</li>
+          <li>Vì sao G1 tên "Garbage First"? → thu region nhiều rác nhất trước.</li>
+          <li>ZGC đạt pause &lt;1ms bằng cách nào? → colored pointer + load barrier, concurrent.</li>
+          <li>Java có GC sao vẫn leak? → reachable nhưng không cần.</li>
+          <li>ThreadLocal leak trong pool? → ThreadLocalMap value strong ref, không remove.</li>
+          <li>Metaspace khác PermGen? → native memory, tự grow.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>5 bước class loading?</span><span class="icon">+</span></div>
+        <div class="a"><p>Loading (đọc .class, tạo Class object) → Linking gồm Verification (kiểm bytecode an toàn), Preparation (cấp static field giá trị mặc định), Resolution (symbolic→direct reference) → Initialization (chạy &lt;clinit&gt;). Lazy: init khi lần đầu chủ động dùng.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Truy cập static final int B = 10 có kích hoạt class init không?</span><span class="icon">+</span></div>
+        <div class="a"><p>Không. Hằng compile-time được inline vào call site lúc compile, không kích hoạt &lt;clinit&gt;. Truy cập static field non-final hoặc gọi static method thì có.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>&lt;clinit&gt; có thread-safe không? Ứng dụng?</span><span class="icon">+</span></div>
+        <div class="a"><p>Có, JVM đảm bảo &lt;clinit&gt; chạy đúng 1 lần, lock trên Class. Nền của initialization-on-demand holder idiom: lazy singleton qua static nested Holder class, không cần volatile/synchronized.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Parent delegation model làm gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>ClassLoader hỏi cha trước khi tự load: App→Platform→Bootstrap. Đảm bảo class core (java.lang.String) luôn do bootstrap load (chống giả mạo), tránh trùng class. Hai class cùng tên khác loader = hai class khác nhau.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Metaspace khác PermGen thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Metaspace (Java 8+) ở native memory, tự grow (giới hạn MaxMetaspaceSize). PermGen (cũ) ở trong heap, kích thước cố định, hay gây OOM: PermGen. String pool cũng chuyển từ PermGen sang heap ở Java 7.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>StackOverflowError vs OutOfMemoryError?</span><span class="icon">+</span></div>
+        <div class="a"><p>SOF: JVM stack của một thread đầy (đệ quy quá sâu). OOM: heap/metaspace/native đầy. Stack là per-thread (frame biến local); heap chia sẻ (object).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>TLAB là gì, giải quyết vấn đề gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Thread-Local Allocation Buffer: mỗi thread có vùng riêng trong Eden để cấp phát object bằng bump-pointer KHÔNG cần đồng bộ. Tránh nhiều thread tranh con trỏ cấp phát chung. Hết TLAB mới xin block mới.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Escape analysis + scalar replacement?</span><span class="icon">+</span></div>
+        <div class="a"><p>JIT phân tích nếu object không thoát khỏi method thì có thể không cấp trên heap mà tách thành các biến trên stack (scalar replacement) → giảm áp lực GC, đôi khi bỏ luôn lock (lock elision).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>GC xác định rác thế nào? Vì sao không reference counting?</span><span class="icon">+</span></div>
+        <div class="a"><p>Reachability: từ GC roots (biến local stack, static field, JNI, active thread) đánh dấu object reachable; không reachable là rác. Không dùng reference counting vì không xử lý được tham chiếu vòng (A↔B).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Weak generational hypothesis?</span><span class="icon">+</span></div>
+        <div class="a"><p>Hầu hết object chết trẻ. Nên chia young (Eden+Survivor) và old. Minor GC dọn young thường xuyên và rẻ (ít object sống); object sống sót được promote lên old. Major/full GC dọn old, đắt hơn.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Card table dùng để làm gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Giải quyết reference old→young. Chia old thành card 512 byte; write barrier đánh dấu card "dirty" khi ghi reference. Minor GC chỉ quét card dirty thay vì cả old gen → nhanh. G1 dùng remembered set per-region tương tự.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao G1 tên "Garbage First"?</span><span class="icon">+</span></div>
+        <div class="a"><p>Heap chia ~2048 region kích thước đều, vai trò linh hoạt (Eden/Survivor/Old/Humongous). G1 ưu tiên thu region NHIỀU RÁC NHẤT trước để tối đa bộ nhớ thu về trong pause target (MaxGCPauseMillis).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>G1 có mấy loại thu gom?</span><span class="icon">+</span></div>
+        <div class="a"><p>Young GC (STW, thu Eden+Survivor), Concurrent marking (đánh dấu old song song app, SATB), Mixed GC (STW, thu young + một số old region rác nhất). Cân bằng throughput/latency.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>ZGC đạt pause &lt;1ms bằng cách nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Colored pointers (nhét metadata GC vào bit con trỏ 64-bit) + load barrier (kiểm/relocate object khi đọc reference). Hầu hết công việc GC chạy concurrent với app, chỉ vài pha STW cực ngắn, gần như không phụ thuộc heap size.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Strong/soft/weak/phantom reference?</span><span class="icon">+</span></div>
+        <div class="a"><p>Strong: không thu khi còn. Soft: thu khi sắp thiếu bộ nhớ (cache). Weak: thu ở GC kế nếu chỉ còn weak (WeakHashMap). Phantom: enqueue vào ReferenceQueue sau finalize để cleanup off-heap (thay finalize).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>ThreadLocal leak trong thread pool vì sao?</span><span class="icon">+</span></div>
+        <div class="a"><p>ThreadLocalMap dùng weak key nhưng value là STRONG ref. Thread pool sống mãi → nếu không remove(), value bị giữ qua thread → leak. Luôn remove() trong finally sau khi dùng.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>ClassLoader leak là gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Giữ reference tới class/instance của một classloader (thường khi redeploy app) → cả classloader và mọi class nó nạp không được unload → Metaspace phình dần tới OOM Metaspace.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Các loại OutOfMemoryError?</span><span class="icon">+</span></div>
+        <div class="a"><p>Java heap space (leak/object nhiều), GC overhead limit exceeded (GC chạy mãi thu ít), Metaspace (quá nhiều class), unable to create native thread (quá nhiều thread), Direct buffer memory (NIO off-heap).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Quy trình debug heap tăng dần dẫn tới OOM?</span><span class="icon">+</span></div>
+        <div class="a"><p>Chụp heap dump (jmap -dump:live hoặc HeapDumpOnOutOfMemoryError) → mở Eclipse MAT → xem Leak Suspects + dominator tree tìm object giữ nhiều RAM và đường reference giữ nó (GC root path).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>App CPU cao/treo, debug thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>jstack &lt;pid&gt; nhiều lần tìm thread RUNNABLE chiếm CPU hoặc BLOCKED (deadlock). top -H tìm thread OS nóng rồi map nid (hex) sang thread trong jstack. async-profiler cho flame graph CPU.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Flag nào nên đặt cho production?</span><span class="icon">+</span></div>
+        <div class="a"><p>-Xms=-Xmx (tránh resize), chọn GC (-XX:+UseG1GC), -Xlog:gc* để có GC log, -XX:+HeapDumpOnOutOfMemoryError + HeapDumpPath để tự chụp dump khi OOM phục vụ điều tra.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="week4.html"><span class="dir">← Trước</span><span class="title">Week 4 · Concurrency</span></a>
+      <a href="week6.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 6 · Modern Java/IO</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

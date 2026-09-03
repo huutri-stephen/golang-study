@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Senior Java Interview Prep · 8 Weeks</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .week-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; margin-top: 32px; }
+  .week-card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 24px; text-decoration: none; color: var(--text); transition: all .2s; display: block;
+  }
+  .week-card:hover { border-color: var(--accent); transform: translateY(-3px); box-shadow: var(--shadow); }
+  .week-card .n { font-size: 13px; color: var(--accent); font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
+  .week-card h3 { color: var(--text); margin: 8px 0; font-size: 20px; }
+  .week-card p { color: var(--text-dim); font-size: 14px; margin: 0; }
+  .week-card .stars { margin-top: 12px; font-size: 13px; }
+  .center-content { max-width: 1000px; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <main class="content center-content">
+    <div class="hero">
+      <span class="week-badge">Study Hub</span>
+      <h1>Senior Backend Engineer – Java</h1>
+      <p>Lộ trình ôn thi interview 8 tuần theo roadmap.sh/java. Mỗi tuần có notes chi tiết, flashcards, và code examples chạy được (JDK 17).</p>
+      <div class="meta">
+        <div class="item"><b>8</b><span>Tuần</span></div>
+        <div class="item"><b>10+</b><span>Code examples</span></div>
+        <div class="item"><b>80+</b><span>Flashcards</span></div>
+      </div>
+    </div>
+
+    <div class="week-grid">
+      <a class="week-card" href="week1.html">
+        <div class="n">Week 1</div><h3>Java Core &amp; OOP</h3>
+        <p>==/equals, String pool, immutability, OOP, equals/hashCode contract, exceptions.</p>
+        <div class="stars">⭐⭐⭐⭐⭐</div>
+      </a>
+      <a class="week-card" href="week2.html">
+        <div class="n">Week 2</div><h3>Generics &amp; Collections</h3>
+        <p>PECS, type erasure, HashMap internals, ConcurrentHashMap, fail-fast iterator.</p>
+        <div class="stars">⭐⭐⭐⭐⭐</div>
+      </a>
+      <a class="week-card" href="week3.html">
+        <div class="n">Week 3</div><h3>Functional &amp; Streams</h3>
+        <p>Lambda, Stream API, lazy evaluation, Collectors, Optional, parallel stream.</p>
+        <div class="stars">⭐⭐⭐⭐</div>
+      </a>
+      <a class="week-card" href="week4.html">
+        <div class="n">Week 4</div><h3>Concurrency</h3>
+        <p>Executor, CompletableFuture, JMM, volatile, locks, virtual threads.</p>
+        <div class="stars">⭐⭐⭐⭐⭐</div>
+      </a>
+      <a class="week-card" href="week5.html">
+        <div class="n">Week 5</div><h3>JVM, Memory &amp; GC</h3>
+        <p>Class loading, heap layout, GC (G1/ZGC), memory leak, troubleshooting.</p>
+        <div class="stars">⭐⭐⭐⭐⭐</div>
+      </a>
+      <a class="week-card" href="week6.html">
+        <div class="n">Week 6</div><h3>Modern Java &amp; IO</h3>
+        <p>Records, sealed, pattern matching, switch expression, text block, NIO.</p>
+        <div class="stars">⭐⭐⭐⭐</div>
+      </a>
+      <a class="week-card" href="week7.html">
+        <div class="n">Week 7</div><h3>Build, Testing &amp; Ecosystem</h3>
+        <p>Maven/Gradle, JUnit5, Mockito, JPA/Hibernate N+1, logging, Jackson.</p>
+        <div class="stars">⭐⭐⭐⭐</div>
+      </a>
+      <a class="week-card" href="week8.html">
+        <div class="n">Week 8</div><h3>Spring, System Design &amp; Mock</h3>
+        <p>Spring IoC/DI/Boot/REST, @Transactional, microservices, mock interview.</p>
+        <div class="stars">⭐⭐⭐⭐⭐</div>
+      </a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

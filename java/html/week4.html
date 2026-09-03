@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 4 – Concurrency (Deep Dive) | Senior Java</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Java knowledge</div></a>
+      <div class="sub">Deep Dive</div>
+    </div>
+    <h2>Week 4 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#jmm">1. Java Memory Model</a>
+      <a href="#volatile">2. volatile</a>
+      <a href="#cas">3. CAS, Atomic &amp; ABA</a>
+      <a href="#sync">4. synchronized</a>
+      <a href="#aqs">5. AQS</a>
+      <a href="#pool">6. ThreadPoolExecutor</a>
+      <a href="#cf">7. CompletableFuture</a>
+      <a href="#falsesharing">8. False sharing</a>
+      <a href="#vthreads">9. Virtual threads</a>
+      <a href="#deadlock">10. Deadlock</a>
+      <a href="#followup">11. Follow-up</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html">Week 1 · Core &amp; OOP</a>
+      <a href="week2.html">Week 2 · Generics/Collections</a>
+      <a href="week3.html">Week 3 · Functional/Streams</a>
+      <a href="week4.html" class="active">Week 4 · Concurrency</a>
+      <a href="week5.html">Week 5 · JVM/GC</a>
+      <a href="week6.html">Week 6 · Modern Java/IO</a>
+      <a href="week7.html">Week 7 · Build/Testing</a>
+      <a href="week8.html">Week 8 · Spring/Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 4 · Deep Dive</span>
+      <h1>Concurrency &amp; Multithreading</h1>
+      <p>Phần quan trọng nhất cho senior. JMM (reordering, happens-before), false sharing, ThreadPoolExecutor internals, AQS đứng sau các lock, CAS/ABA.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★★</b><span>Priority</span></div>
+        <div class="item"><b>10</b><span>Chủ đề</span></div>
+        <div class="item"><b>~10h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <div class="tldr">
+        <div class="label">TL;DR</div>
+        <ul>
+          <li><code>volatile</code> = visibility, KHÔNG atomic; <code>count++</code> vẫn race.</li>
+          <li>Double-checked locking cần volatile vì cấm reorder "gán reference trước constructor xong".</li>
+          <li>CAS lock-free; ABA khắc phục bằng AtomicStampedReference.</li>
+          <li>AQS = state + hàng đợi FIFO; nền của ReentrantLock/Semaphore.</li>
+          <li>ThreadPool: core→queue→max→reject; tránh newFixedThreadPool (queue vô hạn → OOM).</li>
+          <li>Virtual thread (Loom) hợp IO-bound; pinning trong synchronized.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="jmm">
+      <h2 class="section-title"><span class="num">1</span> Java Memory Model</h2>
+      <div class="block why">
+        <div class="block-label">Vấn đề reordering + cache</div>
+        <p>Mỗi core có cache riêng; compiler + CPU có thể reorder lệnh để tối ưu. Thread A ghi 2 biến theo thứ tự này, thread B có thể thấy theo thứ tự khác.</p>
+      </div>
+      <pre><code><span class="tok-kw">int</span> x = <span class="tok-num">0</span>; <span class="tok-kw">boolean</span> ready = <span class="tok-kw">false</span>;
+<span class="tok-com">// Thread A:            // Thread B:</span>
+x = <span class="tok-num">42</span>;                 <span class="tok-kw">while</span> (!ready) {}
+ready = <span class="tok-kw">true</span>;           print(x);  <span class="tok-com">// có thể in 0!</span></code></pre>
+      <p>Không có happens-before giữa ghi của A và đọc của B → B có thể thấy <code>ready=true</code> nhưng <code>x=0</code>. Fix: <code>volatile boolean ready</code>.</p>
+      <div class="block purpose">
+        <div class="block-label">happens-before — quy tắc chính</div>
+        <ul>
+          <li><b>Program order</b>: trong 1 thread, lệnh trước hb lệnh sau.</li>
+          <li><b>Monitor</b>: unlock hb mọi lock sau đó trên monitor đó.</li>
+          <li><b>volatile</b>: ghi volatile hb mọi đọc sau đó.</li>
+          <li><b>Thread start/join</b>: start hb hành động trong thread; hành động trong thread hb join.</li>
+          <li><b>Transitivity</b>: A hb B, B hb C ⇒ A hb C.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="volatile">
+      <h2 class="section-title"><span class="num">2</span> volatile</h2>
+      <ul>
+        <li>Đảm bảo <b>visibility</b> (đọc thấy ghi mới nhất) + cấm reorder (memory barrier).</li>
+        <li><b>KHÔNG</b> đảm bảo atomicity: <code>count++</code> (read-modify-write) vẫn race.</li>
+      </ul>
+      <div class="block pitfall">
+        <div class="block-label">Double-checked locking cần volatile</div>
+        <pre><code><span class="tok-kw">private static volatile</span> Singleton instance;   <span class="tok-com">// volatile BẮT BUỘC</span>
+<span class="tok-kw">if</span> (instance == <span class="tok-kw">null</span>)
+    <span class="tok-kw">synchronized</span> (lock) {
+        <span class="tok-kw">if</span> (instance == <span class="tok-kw">null</span>) instance = <span class="tok-kw">new</span> Singleton();
+    }</code></pre>
+        <p><code>new Singleton()</code> = cấp bộ nhớ → chạy constructor → gán reference. CPU có thể reorder gán reference <b>trước</b> khi constructor xong → thread khác thấy <code>instance != null</code> nhưng chưa init. volatile cấm reorder này.</p>
+      </div>
+    </section>
+
+    <section id="cas">
+      <h2 class="section-title"><span class="num">3</span> CAS, Atomic &amp; ABA</h2>
+      <div class="block how">
+        <div class="block-label">CAS (Compare-And-Swap)</div>
+        <pre><code>AtomicInteger c = <span class="tok-kw">new</span> AtomicInteger(<span class="tok-num">0</span>);
+c.<span class="tok-fn">incrementAndGet</span>();   <span class="tok-com">// đọc v -> tính v+1 -> CAS(v, v+1); fail thì retry (spin)</span></code></pre>
+        <p>Thao tác phần cứng nguyên tử: nếu giá trị hiện tại == kỳ vọng thì ghi giá trị mới. Lock-free, nhanh khi tranh chấp thấp. Tranh chấp cao → nhiều retry → cân nhắc <code>LongAdder</code> (chia cell).</p>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Bài toán ABA</div>
+        <p>CAS chỉ so <b>giá trị</b>, không biết A→B→A. Thread thấy vẫn "A" nên CAS thành công dù trạng thái đã đổi (vấn đề với cấu trúc lock-free dùng con trỏ). Khắc phục: <code>AtomicStampedReference</code> (gắn version/stamp).</p>
+      </div>
+    </section>
+
+    <section id="sync">
+      <h2 class="section-title"><span class="num">4</span> synchronized</h2>
+      <p><code>synchronized</code> block → bytecode <code>monitorenter/monitorexit</code>; method → flag <code>ACC_SYNCHRONIZED</code>. Mỗi object có monitor (gắn mark word), reentrant.</p>
+      <div class="dg">
+        <div class="dg-title">Lock upgrade (HotSpot, tới Java 15)</div>
+        <div class="dg-row scroll">
+          <div class="node green">biased<div class="sub">1 thread — bỏ mặc định J15</div></div>
+          <div class="arrow-h acc"></div>
+          <div class="node orange">lightweight<div class="sub">CAS spin trên mark word</div></div>
+          <div class="arrow-h acc"></div>
+          <div class="node red">heavyweight<div class="sub">OS mutex, park thread</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="aqs">
+      <h2 class="section-title"><span class="num">5</span> AQS</h2>
+      <div class="block purpose">
+        <div class="block-label">AbstractQueuedSynchronizer</div>
+        <p>Khung nền cho <code>ReentrantLock</code>, <code>Semaphore</code>, <code>CountDownLatch</code>, <code>ReadWriteLock</code>. Giữ <code>volatile int state</code> (ý nghĩa tùy lock) + hàng đợi FIFO thread chờ (CLH). Thread không giành được → <code>LockSupport.park()</code> (không spin lãng phí), được nhả thì <code>unpark</code>.</p>
+      </div>
+      <table>
+        <tr><th></th><th>synchronized</th><th>ReentrantLock (AQS)</th></tr>
+        <tr><td>Nhả khoá</td><td>tự động</td><td>unlock() trong finally</td></tr>
+        <tr><td>tryLock/timeout</td><td>không</td><td>có</td></tr>
+        <tr><td>Interruptible</td><td>không</td><td>lockInterruptibly()</td></tr>
+        <tr><td>Fairness</td><td>không</td><td>tùy chọn (FIFO)</td></tr>
+        <tr><td>Condition</td><td>1 (wait/notify)</td><td>nhiều newCondition()</td></tr>
+      </table>
+      <p>Primitive dựa AQS: <code>Semaphore(n)</code> (n permit), <code>CountDownLatch(n)</code> (chờ n sự kiện, 1 lần), <code>CyclicBarrier(n)</code> (chờ nhau, tái dùng), <code>ReadWriteLock</code> (nhiều reader).</p>
+    </section>
+
+    <section id="pool">
+      <h2 class="section-title"><span class="num">6</span> ThreadPoolExecutor internals</h2>
+      <div class="dg">
+        <div class="dg-title">Thứ tự xử lý khi submit task</div>
+        <div class="dg-row scroll">
+          <div class="node accent">&lt; core?<div class="sub">tạo thread mới</div></div>
+          <div class="arrow-h acc"></div>
+          <div class="node">queue<div class="sub">đủ core → vào queue</div></div>
+          <div class="arrow-h acc"></div>
+          <div class="node orange">&lt; max?<div class="sub">queue đầy → tạo tới max</div></div>
+          <div class="arrow-h acc"></div>
+          <div class="node red">reject<div class="sub">queue đầy + đạt max</div></div>
+        </div>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Bẫy Executors factory</div>
+        <p><code>newFixedThreadPool</code>/<code>newSingleThreadExecutor</code> dùng <b>LinkedBlockingQueue không giới hạn</b> → task dồn vô hạn → <b>OOM</b> thay vì reject (bước 3-4 không xảy ra). <code>newCachedThreadPool</code> tạo thread không giới hạn. Nên tự tạo <code>ThreadPoolExecutor</code> với <b>bounded queue</b> + rejection policy.</p>
+      </div>
+      <p>Rejection: <code>AbortPolicy</code> (ném exception), <code>CallerRunsPolicy</code> (chạy trên thread gọi → back-pressure), <code>Discard/DiscardOldest</code>.</p>
+    </section>
+
+    <section id="cf">
+      <h2 class="section-title"><span class="num">7</span> CompletableFuture</h2>
+      <pre><code>CompletableFuture
+    .<span class="tok-fn">supplyAsync</span>(() -&gt; fetchUser(id), executor)  <span class="tok-com">// nên truyền executor riêng</span>
+    .<span class="tok-fn">thenApply</span>(User::name)                        <span class="tok-com">// map</span>
+    .<span class="tok-fn">thenCompose</span>(n -&gt; fetchOrdersAsync(n))         <span class="tok-com">// flatMap nối future</span>
+    .<span class="tok-fn">thenCombine</span>(other, (a, b) -&gt; merge(a, b))     <span class="tok-com">// gộp 2 future song song</span>
+    .<span class="tok-fn">exceptionally</span>(ex -&gt; fallback())              <span class="tok-com">// xử lý lỗi</span>
+    .<span class="tok-fn">orTimeout</span>(<span class="tok-num">2</span>, TimeUnit.SECONDS);</code></pre>
+      <ul>
+        <li><code>thenApply</code> chạy trên thread hoàn thành stage trước; <code>thenApplyAsync</code> chạy trên pool khác.</li>
+        <li>Mặc định dùng <b>ForkJoinPool.commonPool</b> → production nên truyền executor riêng.</li>
+        <li>Exception lan dọc chain, <code>thenApply</code> bị skip tới khi gặp <code>exceptionally</code>/<code>handle</code>.</li>
+      </ul>
+    </section>
+
+    <section id="falsesharing">
+      <h2 class="section-title"><span class="num">8</span> False sharing</h2>
+      <div class="block pitfall">
+        <div class="block-label">Bug hiệu năng tinh vi</div>
+        <p>CPU cache theo <b>cache line</b> (~64 byte). Hai biến khác nhau cùng cache line → thread A ghi biến X invalidate cache line ở core đang đọc biến Y (dù Y không đổi) → giảm hiệu năng nghiêm trọng trong hot loop đa luồng. Giải: padding hoặc <code>@Contended</code>. <code>LongAdder</code> thắng <code>AtomicLong</code> khi contention cao một phần nhờ tách cell tránh false sharing.</p>
+      </div>
+    </section>
+
+    <section id="vthreads">
+      <h2 class="section-title"><span class="num">9</span> Virtual threads (Loom, Java 21)</h2>
+      <div class="grid-2">
+        <div class="col"><h4>Platform thread</h4><p>Map 1-1 OS thread (~1MB stack, giới hạn vài nghìn, tạo/switch tốn kém).</p></div>
+        <div class="col"><h4>Virtual thread</h4><p>Nhẹ, JVM lập lịch trên tập nhỏ carrier thread. Block IO → unmount khỏi carrier → carrier chạy vt khác. Tạo được hàng triệu.</p></div>
+      </div>
+      <div class="block best"><div class="block-label">Dùng khi</div><p>Workload <b>IO-bound</b> nhiều kết nối — viết code blocking đơn giản thay vì async callback. KHÔNG tăng tốc CPU-bound.</p></div>
+      <div class="block pitfall"><div class="block-label">Pinning</div><p>Virtual thread block trong <code>synchronized</code> hoặc native call → bị ghim vào carrier (không unmount) → giảm lợi ích. Khuyến nghị dùng <code>ReentrantLock</code> thay <code>synchronized</code> trong đoạn có blocking.</p></div>
+    </section>
+
+    <section id="deadlock">
+      <h2 class="section-title"><span class="num">10</span> Deadlock &amp; chẩn đoán</h2>
+      <div class="block why">
+        <div class="block-label">4 điều kiện Coffman</div>
+        <p>mutual exclusion + hold-and-wait + no preemption + circular wait. Phá 1 điều kiện là hết deadlock.</p>
+      </div>
+      <div class="block best">
+        <div class="block-label">Cách tránh + chẩn đoán</div>
+        <ul>
+          <li><b>Lock ordering</b>: giữ khoá theo cùng thứ tự (vd id tăng dần) → phá circular wait.</li>
+          <li><code>tryLock(timeout)</code> → nhả và thử lại thay vì chờ vô hạn.</li>
+          <li><code>jstack &lt;pid&gt;</code> → "Found one Java-level deadlock" + chu trình khoá.</li>
+        </ul>
+      </div>
+      <div class="block pitfall"><div class="block-label">ThreadLocal + pool = leak</div><p>Thread pool tái dùng thread → phải <code>threadLocal.remove()</code> (trong finally) sau khi xong, nếu không dữ liệu rò rỉ sang task sau và giữ object không cho GC.</p></div>
+    </section>
+
+    <section id="followup">
+      <h2 class="section-title"><span class="num">11</span> Follow-up questions</h2>
+      <div class="block purpose">
+        <div class="block-label">Interviewer hay đào tiếp</div>
+        <ul>
+          <li>Vì sao double-checked locking cần volatile? → cấm reorder gán reference trước constructor xong.</li>
+          <li>volatile có làm count++ an toàn? → không.</li>
+          <li>CAS/ABA khắc phục thế nào? → AtomicStampedReference.</li>
+          <li>ThreadPool xử lý task thứ tự nào? → core → queue → max → reject.</li>
+          <li>Vì sao tránh newFixedThreadPool? → queue vô hạn → OOM.</li>
+          <li>AQS là gì? → state + hàng đợi FIFO; park/unpark.</li>
+          <li>False sharing? → 2 biến cùng cache line; padding/@Contended.</li>
+          <li>Virtual thread pinning? → block trong synchronized/native ghim vào carrier.</li>
+          <li>happens-before của volatile/lock? → ghi volatile hb đọc; unlock hb lock.</li>
+          <li>LongAdder thắng AtomicLong khi nào? → contention cao (tách cell).</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>JMM giải quyết vấn đề gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Định nghĩa khi nào một thread thấy được ghi của thread khác, và cho phép compiler/CPU reorder lệnh miễn không đổi ngữ nghĩa đơn luồng. Không đồng bộ → thread có thể thấy ghi theo thứ tự khác hoặc giá trị cũ.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>happens-before, kể các quy tắc chính?</span><span class="icon">+</span></div>
+        <div class="a"><p>Program order (trong 1 thread), monitor (unlock hb lock cùng monitor), volatile (ghi hb đọc), thread start (start hb hành động trong thread), thread join, và transitivity. Nếu A hb B thì mọi ghi trước A thấy được ở B.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao while(!ready){} print(x) có thể in giá trị cũ của x?</span><span class="icon">+</span></div>
+        <div class="a"><p>Không có happens-before giữa ghi của thread A và đọc của B. B có thể thấy ready=true nhưng x chưa được flush/reorder → in 0. Fix: khai báo ready volatile để tạo happens-before.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>volatile đảm bảo gì, không đảm bảo gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Đảm bảo visibility (đọc thấy ghi mới nhất) + cấm reorder (memory barrier). KHÔNG đảm bảo atomicity: count++ vẫn race. Dùng cho flag, publish reference, double-checked locking.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao double-checked locking cần volatile?</span><span class="icon">+</span></div>
+        <div class="a"><p>instance = new Singleton() gồm cấp bộ nhớ, chạy constructor, gán reference. CPU có thể reorder gán reference TRƯỚC khi constructor xong → thread khác thấy instance != null nhưng chưa init. volatile cấm reorder.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>CAS hoạt động thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Compare-And-Swap: thao tác phần cứng nguyên tử, nếu giá trị hiện tại == kỳ vọng thì ghi giá trị mới. incrementAndGet lặp: đọc v, tính v+1, CAS(v,v+1), fail thì retry. Lock-free, nhanh khi tranh chấp thấp.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Bài toán ABA là gì? Khắc phục?</span><span class="icon">+</span></div>
+        <div class="a"><p>CAS chỉ so giá trị, không biết A→B→A đã xảy ra. Thread thấy vẫn "A" nên CAS thành công dù trạng thái đã đổi. Vấn đề với cấu trúc lock-free (con trỏ node). Khắc phục: AtomicStampedReference (gắn version/stamp).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Khi nào LongAdder tốt hơn AtomicLong?</span><span class="icon">+</span></div>
+        <div class="a"><p>Contention cao. AtomicLong nhiều thread cùng CAS một biến → nhiều retry (spin lãng phí) + false sharing. LongAdder chia thành nhiều cell, mỗi thread cộng vào cell riêng, tổng khi cần → giảm tranh chấp.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Lock upgrade của synchronized?</span><span class="icon">+</span></div>
+        <div class="a"><p>biased → lightweight (CAS spin trên mark word) → heavyweight (OS mutex, park thread). Biased locking đã bỏ mặc định từ Java 15. Heavyweight tốn context switch vào kernel.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>AQS là gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>AbstractQueuedSynchronizer: khung nền cho ReentrantLock/Semaphore/CountDownLatch. Giữ volatile int state (ý nghĩa tùy lock) + hàng đợi FIFO thread chờ. Thread không giành được thì LockSupport.park (không spin lãng phí).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>synchronized vs ReentrantLock?</span><span class="icon">+</span></div>
+        <div class="a"><p>synchronized tự nhả khoá, đơn giản. ReentrantLock (AQS): tryLock/timeout, lockInterruptibly, fairness, nhiều Condition, nhưng phải unlock trong finally. Cả hai reentrant.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>CountDownLatch vs CyclicBarrier?</span><span class="icon">+</span></div>
+        <div class="a"><p>CountDownLatch: chờ n sự kiện (countDown → await), dùng 1 lần. CyclicBarrier: n thread chờ nhau tại điểm hẹn, tái sử dụng được (reset sau mỗi vòng).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>ThreadPoolExecutor xử lý task theo thứ tự nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>1) &lt; corePoolSize → tạo thread mới. 2) đủ core → vào queue. 3) queue đầy &amp; &lt; max → tạo thread tới max. 4) queue đầy &amp; đạt max → rejection handler.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao tránh Executors.newFixedThreadPool trong production?</span><span class="icon">+</span></div>
+        <div class="a"><p>Dùng LinkedBlockingQueue KHÔNG giới hạn → task dồn vô hạn → OOM thay vì back-pressure (bước tạo thread tới max/reject không xảy ra). Nên tự tạo ThreadPoolExecutor với bounded queue + rejection policy.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>CallerRunsPolicy làm gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Khi pool quá tải, task bị từ chối sẽ chạy trên thread gọi submit → làm chậm producer → tạo back-pressure tự nhiên, tránh dồn task vô hạn.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>thenApply vs thenApplyAsync?</span><span class="icon">+</span></div>
+        <div class="a"><p>thenApply chạy trên thread hoàn thành stage trước (có thể chiếm thread đó). thenApplyAsync chạy trên pool khác. Production nên truyền executor riêng thay vì mặc định ForkJoinPool.commonPool.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>CompletableFuture xử lý exception thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Exception lan dọc chain, stage thenApply bị skip cho tới khi gặp exceptionally(fn) (fallback) hoặc handle((r,e)-&gt;...) (cả 2 nhánh). thenCompose = flatMap nối future, thenCombine gộp 2 future song song.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>False sharing là gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>CPU cache theo cache line (~64 byte). 2 biến khác nhau cùng cache line: ghi biến X invalidate cache line ở core đang đọc biến Y (dù Y không đổi) → chậm trong hot loop đa luồng. Fix: padding hoặc @Contended.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Virtual thread vs platform thread?</span><span class="icon">+</span></div>
+        <div class="a"><p>Platform map 1-1 OS thread (~1MB, vài nghìn). Virtual (Loom) nhẹ, JVM lập lịch trên carrier thread, unmount khi block IO → triệu cái, hợp IO-bound. Không tăng tốc CPU-bound.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Virtual thread pinning là gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Nếu virtual thread block trong synchronized hoặc native call, nó bị ghim vào carrier thread (không unmount) → giảm lợi ích. Khuyến nghị dùng ReentrantLock thay synchronized trong đoạn có blocking.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>4 điều kiện deadlock và cách tránh?</span><span class="icon">+</span></div>
+        <div class="a"><p>mutual exclusion, hold-and-wait, no preemption, circular wait. Tránh: lock ordering (thứ tự cố định phá circular wait), tryLock timeout, giảm phạm vi/số khoá. Chẩn đoán: jstack phát hiện deadlock.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>ThreadLocal bẫy gì trong thread pool?</span><span class="icon">+</span></div>
+        <div class="a"><p>Thread tái dùng nên phải remove() sau khi xong (trong finally), nếu không dữ liệu rò rỉ sang task sau và giữ object không cho GC → memory leak.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="week3.html"><span class="dir">← Trước</span><span class="title">Week 3 · Functional/Streams</span></a>
+      <a href="week5.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 5 · JVM/GC</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

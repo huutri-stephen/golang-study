@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 6 – Modern Java &amp; IO (Deep Dive) | Senior Java</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Java knowledge</div></a>
+      <div class="sub">Deep Dive</div>
+    </div>
+    <h2>Week 6 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#records">1. Records internals</a>
+      <a href="#sealed">2. Sealed classes</a>
+      <a href="#pattern">3. Pattern matching</a>
+      <a href="#switch">4. Switch desugaring</a>
+      <a href="#textblock">5. Text blocks</a>
+      <a href="#var">6. var</a>
+      <a href="#io">7. IO: stream, decorator</a>
+      <a href="#nio">8. NIO</a>
+      <a href="#serial">9. Serialization</a>
+      <a href="#followup">10. Follow-up</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html">Week 1 · Core &amp; OOP</a>
+      <a href="week2.html">Week 2 · Generics/Collections</a>
+      <a href="week3.html">Week 3 · Functional/Streams</a>
+      <a href="week4.html">Week 4 · Concurrency</a>
+      <a href="week5.html">Week 5 · JVM/GC</a>
+      <a href="week6.html" class="active">Week 6 · Modern Java/IO</a>
+      <a href="week7.html">Week 7 · Build/Testing</a>
+      <a href="week8.html">Week 8 · Spring/Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 6 · Deep Dive</span>
+      <h1>Modern Java &amp; IO/NIO</h1>
+      <p>Record biên dịch thành gì, sealed enforce compile + runtime, switch desugar, và NIO buffer/channel/selector khác IO blocking chỗ nào.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★</b><span>Priority</span></div>
+        <div class="item"><b>9</b><span>Chủ đề</span></div>
+        <div class="item"><b>~6h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <div class="tldr">
+        <div class="label">TL;DR</div>
+        <ul>
+          <li>Record: equals/hashCode qua <code>invokedynamic</code> + <code>ObjectMethods.bootstrap</code>; immutable KHÔNG sâu nếu component mutable.</li>
+          <li>Sealed enforce compile + class file attribute <code>PermittedSubclasses</code>; ADT sum + product.</li>
+          <li>instanceof pattern flow scoping (GA J16); switch pattern GA J21.</li>
+          <li>Switch trên String desugar 2 tầng (hashCode + equals).</li>
+          <li>NIO: buffer + channel + selector (1 thread N connection); tránh Java serialization (RCE).</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="records">
+      <h2 class="section-title"><span class="num">1</span> Records internals</h2>
+      <pre><code><span class="tok-kw">record</span> Point(<span class="tok-kw">int</span> x, <span class="tok-kw">int</span> y) {}</code></pre>
+      <div class="block purpose">
+        <div class="block-label">Compiler sinh gì</div>
+        <p>Field <code>private final</code> mỗi component, canonical constructor, accessor (<code>x()</code> không phải <code>getX()</code>), equals/hashCode/toString qua <code>invokedynamic</code> + <code>ObjectMethods.bootstrap</code> (nhất quán mọi component), class <code>final</code> kế thừa <code>java.lang.Record</code>.</p>
+      </div>
+      <pre><code><span class="tok-kw">record</span> Range(<span class="tok-kw">int</span> lo, <span class="tok-kw">int</span> hi) {
+    Range {   <span class="tok-com">// compact constructor: validate, chạy trước gán field ẩn</span>
+        <span class="tok-kw">if</span> (lo &gt; hi) <span class="tok-kw">throw new</span> IllegalArgumentException();
+    }
+}</code></pre>
+      <div class="block pitfall"><div class="block-label">Immutable KHÔNG sâu</div><p>Field final nhưng nếu component là kiểu mutable (List, mảng) thì nội dung vẫn đổi được qua reference. Muốn bất biến sâu phải defensive copy trong compact constructor + accessor.</p></div>
+    </section>
+
+    <section id="sealed">
+      <h2 class="section-title"><span class="num">2</span> Sealed classes</h2>
+      <pre><code><span class="tok-kw">sealed interface</span> Shape <span class="tok-kw">permits</span> Circle, Square, Rectangle {}
+<span class="tok-kw">record</span> Circle(<span class="tok-kw">double</span> r) <span class="tok-kw">implements</span> Shape {}</code></pre>
+      <div class="block why"><div class="block-label">Enforce ở đâu</div><p>Compile-time (chỉ class trong permits được implement) VÀ runtime (class file attribute <code>PermittedSubclasses</code>). Subtype phải là <code>final</code>, <code>sealed</code>, hoặc <code>non-sealed</code>.</p></div>
+      <div class="block purpose"><div class="block-label">Sealed + record = ADT</div><p>Algebraic data type: sum type (Shape = Circle | Square | Rectangle qua sealed) + product type (record). Cho phép switch pattern matching exhaustive không cần default, thay visitor pattern cồng kềnh.</p></div>
+    </section>
+
+    <section id="pattern">
+      <h2 class="section-title"><span class="num">3</span> Pattern matching</h2>
+      <pre><code><span class="tok-com">// instanceof pattern (GA J16): check + bind + guard, bỏ cast</span>
+<span class="tok-kw">if</span> (obj <span class="tok-kw">instanceof</span> String s &amp;&amp; s.length() &gt; <span class="tok-num">3</span>) { use(s); }
+
+<span class="tok-com">// switch pattern matching (preview J17, GA J21):</span>
+<span class="tok-kw">switch</span> (shape) {
+    <span class="tok-kw">case</span> Circle c    -&gt; ...;
+    <span class="tok-kw">case</span> Square s    -&gt; ...;
+    <span class="tok-com">// sealed -> exhaustive, không cần default</span>
+}</code></pre>
+      <div class="block how"><div class="block-label">Ghi chú</div><p>instanceof pattern bind biến chỉ trong scope điều kiện chắc đúng (flow scoping), bỏ cast thủ công. J21 thêm record deconstruction <code>case Circle(double r)</code> và guard <code>case Integer i when i &gt; 0</code>. Tài liệu này dùng if-instanceof cho JDK 17.</p></div>
+    </section>
+
+    <section id="switch">
+      <h2 class="section-title"><span class="num">4</span> Switch expression &amp; desugaring</h2>
+      <pre><code><span class="tok-kw">int</span> days = <span class="tok-kw">switch</span> (month) {
+    <span class="tok-kw">case</span> JAN, MAR, MAY -&gt; <span class="tok-num">31</span>;      <span class="tok-com">// arrow: không fall-through</span>
+    <span class="tok-kw">case</span> FEB -&gt; <span class="tok-num">28</span>;
+    <span class="tok-kw">default</span> -&gt; { <span class="tok-kw">int</span> d = compute(month); <span class="tok-kw">yield</span> d; }  <span class="tok-com">// yield trả giá trị</span>
+};</code></pre>
+      <ul>
+        <li>Expression trả giá trị; arrow không fall-through (không cần break); <code>yield</code> cho block.</li>
+        <li>Exhaustiveness với enum/sealed → compiler yêu cầu đủ nhánh (quên = lỗi compile).</li>
+      </ul>
+      <div class="block how"><div class="block-label">Desugaring</div><p>Switch trên int/enum → <code>tableswitch</code> (dày) hoặc <code>lookupswitch</code> (thưa). Switch trên <b>String</b> → 2 tầng: <code>hashCode()</code> nhóm case rồi <code>equals()</code> xác nhận (tránh hash collision). Switch pattern matching → <code>invokedynamic</code> (SwitchBootstraps).</p></div>
+    </section>
+
+    <section id="textblock">
+      <h2 class="section-title"><span class="num">5</span> Text blocks</h2>
+      <pre><code>String json = <span class="tok-str">"""
+    {
+      "name": "an"
+    }"""</span>;   <span class="tok-com">// Java 15+</span></code></pre>
+      <p>Bỏ escape <code>\n</code>, <code>\"</code>. Compiler xử lý <b>incidental whitespace</b> (thụt lề chung, xác định bởi vị trí <code>"""</code> đóng). <code>\</code> cuối dòng = nối dòng; <code>\s</code> = giữ space cuối. Chỉ là syntactic sugar → kết quả là String thường.</p>
+    </section>
+
+    <section id="var">
+      <h2 class="section-title"><span class="num">6</span> var — local type inference</h2>
+      <div class="block why"><div class="block-label">Không phải dynamic typing</div><p><code>var</code> chỉ suy kiểu lúc compile từ vế phải, kiểu vẫn <b>tĩnh &amp; cố định</b>, không overhead runtime. Chỉ dùng cho biến local có khởi tạo; không field, tham số, return type, hay <code>null</code>. Nên dùng khi kiểu hiển nhiên (<code>var list = new ArrayList&lt;String&gt;()</code>).</p></div>
+    </section>
+
+    <section id="io">
+      <h2 class="section-title"><span class="num">7</span> IO: stream, decorator</h2>
+      <table>
+        <tr><th></th><th>Byte stream</th><th>Char stream</th></tr>
+        <tr><td>Lớp gốc</td><td>InputStream/OutputStream</td><td>Reader/Writer</td></tr>
+        <tr><td>Đơn vị</td><td>byte (nhị phân)</td><td>char (text + encoding)</td></tr>
+        <tr><td>Ví dụ</td><td>FileInputStream</td><td>FileReader, InputStreamReader</td></tr>
+      </table>
+      <div class="block purpose">
+        <div class="block-label">Decorator pattern</div>
+        <pre><code>DataInputStream in = <span class="tok-kw">new</span> DataInputStream(
+    <span class="tok-kw">new</span> BufferedInputStream(
+        <span class="tok-kw">new</span> FileInputStream(<span class="tok-str">"f.bin"</span>)));</code></pre>
+        <p><code>java.io</code> là ví dụ kinh điển của Decorator — bọc stream để thêm khả năng. <code>InputStreamReader</code> là cầu byte→char (kèm charset — luôn chỉ định UTF-8 tránh mojibake).</p>
+      </div>
+      <div class="block how"><div class="block-label">Vì sao buffered</div><p>Đọc từng byte trực tiếp = 1 syscall/byte → rất chậm. <code>BufferedInputStream</code> đọc một khối vào bộ nhớ rồi phục vụ từng byte từ buffer → giảm số syscall hàng nghìn lần.</p></div>
+    </section>
+
+    <section id="nio">
+      <h2 class="section-title"><span class="num">8</span> NIO</h2>
+      <div class="block how">
+        <div class="block-label">3 khái niệm cốt lõi</div>
+        <ul>
+          <li><b>Buffer</b> (<code>ByteBuffer</code>): position/limit/capacity; <code>flip()</code> chuyển ghi→đọc; direct buffer off-heap.</li>
+          <li><b>Channel</b> (<code>FileChannel</code>, <code>SocketChannel</code>): hai chiều, làm việc với buffer, có thể non-blocking.</li>
+          <li><b>Selector</b>: 1 thread <code>select()</code> giám sát nhiều channel → xử lý channel sẵn sàng.</li>
+        </ul>
+      </div>
+      <div class="dg">
+        <div class="dg-title">IO blocking vs NIO selector</div>
+        <div class="dg-row scroll">
+          <div class="node red">IO cũ<div class="sub">1 thread / 1 connection</div></div>
+          <div class="arrow-h"></div>
+          <div class="node green">NIO<div class="sub">1 thread / N connection (Netty)</div></div>
+        </div>
+      </div>
+      <p><code>java.nio.file.Path</code>/<code>Files</code> tiện &amp; an toàn hơn <code>java.io.File</code> cũ (thao tác atomic, symbolic link, xử lý lỗi rõ ràng).</p>
+    </section>
+
+    <section id="serial">
+      <h2 class="section-title"><span class="num">9</span> Serialization</h2>
+      <div class="block pitfall">
+        <div class="block-label">Nên tránh Java Serialization</div>
+        <ul>
+          <li><b>Bảo mật</b>: deserialize dữ liệu không tin cậy → <b>RCE</b> (gadget chain, <code>readObject</code> chạy code).</li>
+          <li><b>Gắn chặt</b>: serialVersionUID + cấu trúc class → khó đổi version.</li>
+          <li>Không cross-language, nhị phân khó debug.</li>
+        </ul>
+      </div>
+      <div class="block best"><div class="block-label">Thay bằng</div><p>JSON (Jackson/Gson) cho API; Protobuf/Avro cho hiệu năng + schema evolution. Nếu buộc dùng: đặt <code>ObjectInputFilter</code> (J9+) whitelist/blacklist class, giới hạn depth.</p></div>
+    </section>
+
+    <section id="followup">
+      <h2 class="section-title"><span class="num">10</span> Follow-up questions</h2>
+      <div class="block purpose">
+        <div class="block-label">Interviewer hay đào tiếp</div>
+        <ul>
+          <li>Record sinh equals/hashCode thế nào? → invokedynamic + ObjectMethods.bootstrap.</li>
+          <li>Record immutable sâu không? → không nếu component mutable; cần defensive copy.</li>
+          <li>Sealed enforce ở đâu? → compile + class file attribute PermittedSubclasses.</li>
+          <li>instanceof pattern lợi gì? → check + bind + flow scoping, bỏ cast.</li>
+          <li>Switch trên String desugar thế nào? → hashCode nhóm + equals xác nhận (2 tầng).</li>
+          <li>var có làm chậm runtime không? → không, chỉ suy kiểu compile-time.</li>
+          <li>Selector cho phép làm gì? → 1 thread giám sát nhiều channel (Netty).</li>
+          <li>Direct buffer là gì? → off-heap, giảm copy khi I/O, cấp phát đắt hơn.</li>
+          <li>Vì sao tránh Java serialization? → RCE khi deserialize không tin cậy.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Record được compiler sinh ra những gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Field private final cho mỗi component, canonical constructor, accessor tên component (x() không phải getX()), equals/hashCode/toString (qua invokedynamic + ObjectMethods.bootstrap), class final kế thừa java.lang.Record. Không extends class khác.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Record có immutable sâu không?</span><span class="icon">+</span></div>
+        <div class="a"><p>Không hẳn. Field là final nhưng nếu component là kiểu mutable (List, mảng) thì nội dung vẫn thay đổi được qua reference. Muốn bất biến sâu phải defensive copy trong compact constructor và accessor.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Compact constructor chạy khi nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Chạy trước phần gán field ẩn. Không khai báo tham số/không gán this.field; gán vào tham số để normalize thì compiler tự copy vào field. Dùng để validate hoặc chuẩn hoá.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Sealed class enforce ở đâu?</span><span class="icon">+</span></div>
+        <div class="a"><p>Compile-time (chỉ class trong permits được implement) VÀ runtime (ghi vào class file attribute PermittedSubclasses). Subtype phải là final, sealed, hoặc non-sealed.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Sealed + record cho phép mô hình gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Algebraic data type: sum type (Shape = Circle | Square | Rectangle qua sealed) + product type (record). Cho phép switch pattern matching exhaustive không cần default, thay visitor pattern.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>instanceof pattern matching lợi gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>if (o instanceof String s) vừa check kiểu vừa bind biến s đã cast (flow scoping: s chỉ dùng được khi chắc đúng kiểu). Bỏ cast thủ công dễ sai. GA từ Java 16.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Switch expression khác switch statement?</span><span class="icon">+</span></div>
+        <div class="a"><p>Expression trả giá trị; arrow -&gt; không fall-through (không cần break); yield trả giá trị từ block; exhaustive với enum/sealed (thiếu nhánh = lỗi compile). An toàn hơn switch cũ.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>switch trên String desugar thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>2 tầng: dùng hashCode() để nhóm các case (tableswitch/lookupswitch trên hash), rồi equals() xác nhận đúng chuỗi (tránh hash collision). Switch trên int/enum dùng tableswitch/lookupswitch trực tiếp.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Text block xử lý thụt lề thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Compiler loại "incidental whitespace" (thụt lề chung, xác định bởi vị trí """ đóng). \ cuối dòng nối dòng, \s giữ space cuối. Chỉ là syntactic sugar, kết quả là String thường.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>var có phải dynamic typing không?</span><span class="icon">+</span></div>
+        <div class="a"><p>Không. var là local type inference: compiler suy kiểu từ vế phải, kiểu vẫn tĩnh và cố định, không overhead runtime. Chỉ cho biến local có khởi tạo, không field/tham số/return/null.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>java.io dùng design pattern nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Decorator: bọc stream để thêm khả năng, vd new DataInputStream(new BufferedInputStream(new FileInputStream(f))). InputStreamReader là cầu byte→char kèm charset (nên chỉ định UTF-8).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao buffered stream nhanh hơn nhiều?</span><span class="icon">+</span></div>
+        <div class="a"><p>Đọc từng byte trực tiếp = 1 syscall/byte, rất chậm. BufferedInputStream đọc một khối vào bộ nhớ rồi phục vụ từng byte từ buffer → giảm số syscall hàng nghìn lần.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>3 khái niệm cốt lõi của NIO?</span><span class="icon">+</span></div>
+        <div class="a"><p>Buffer (vùng nhớ có position/limit/capacity, flip() chuyển ghi↔đọc, có direct buffer off-heap), Channel (hai chiều, làm việc với buffer, có thể non-blocking), Selector (1 thread select() giám sát nhiều channel).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>NIO khác IO blocking thế nào về mô hình thread?</span><span class="icon">+</span></div>
+        <div class="a"><p>IO cũ: 1 thread/1 connection (blocking) → nhiều kết nối tốn nhiều thread. NIO với selector: 1 thread giám sát N channel, chỉ xử lý channel sẵn sàng → 1 thread phục vụ hàng nghìn kết nối (nền của Netty).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Direct buffer là gì, đánh đổi?</span><span class="icon">+</span></div>
+        <div class="a"><p>ByteBuffer off-heap (allocateDirect): giảm copy giữa JVM heap và OS khi I/O → nhanh cho I/O lớn. Đánh đổi: cấp phát/thu hồi đắt hơn, không do GC thường quản (dễ leak nếu giữ lâu).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao tránh Java Serialization?</span><span class="icon">+</span></div>
+        <div class="a"><p>Deserialize dữ liệu không tin cậy có thể RCE (gadget chain, readObject chạy code); gắn chặt cấu trúc class (serialVersionUID, khó đổi version); không cross-language; nhị phân khó debug. Thay bằng JSON hoặc Protobuf/Avro.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Nếu buộc dùng Java serialization thì phòng thủ thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Dùng ObjectInputFilter (Java 9+) để whitelist/blacklist class được deserialize, giới hạn depth/số object, chặn các gadget class nguy hiểm. Không bao giờ deserialize dữ liệu từ nguồn không tin cậy mà không lọc.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="week5.html"><span class="dir">← Trước</span><span class="title">Week 5 · JVM/GC</span></a>
+      <a href="week7.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 7 · Build/Testing</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

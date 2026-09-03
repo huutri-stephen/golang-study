@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 2 – Generics &amp; Collections (Deep Dive) | Senior Java</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Java knowledge</div></a>
+      <div class="sub">Deep Dive</div>
+    </div>
+    <h2>Week 2 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#erasure">1. Generics &amp; type erasure</a>
+      <a href="#bridge">2. Bridge method</a>
+      <a href="#pecs">3. PECS &amp; variance</a>
+      <a href="#reifiable">4. Reifiable &amp; mảng generic</a>
+      <a href="#arraylist">5. ArrayList internals</a>
+      <a href="#hashmap">6. HashMap internals</a>
+      <a href="#chm">7. ConcurrentHashMap</a>
+      <a href="#iterator">8. Iterator fail-fast/safe</a>
+      <a href="#followup">9. Follow-up</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html">Week 1 · Core &amp; OOP</a>
+      <a href="week2.html" class="active">Week 2 · Generics/Collections</a>
+      <a href="week3.html">Week 3 · Functional/Streams</a>
+      <a href="week4.html">Week 4 · Concurrency</a>
+      <a href="week5.html">Week 5 · JVM/GC</a>
+      <a href="week6.html">Week 6 · Modern Java/IO</a>
+      <a href="week7.html">Week 7 · Build/Testing</a>
+      <a href="week8.html">Week 8 · Spring/Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 2 · Deep Dive</span>
+      <h1>Generics &amp; Collections</h1>
+      <p>Câu hỏi internals dày đặc nhất: bridge method do erasure, hàm spread hash, ngưỡng treeify, cơ chế resize, và vì sao ConcurrentHashMap không khoá cả map.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★★</b><span>Priority</span></div>
+        <div class="item"><b>8</b><span>Chủ đề</span></div>
+        <div class="item"><b>~8h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <div class="tldr">
+        <div class="label">TL;DR</div>
+        <ul>
+          <li>Erasure: generics chỉ ở compile; compiler chèn <code>checkcast</code> ở nơi get → CCE nổ khi lấy ra.</li>
+          <li><strong>Bridge method</strong>: nối chữ ký generic sau erasure để giữ đa hình.</li>
+          <li><strong>PECS</strong>: Producer <code>? extends</code>, Consumer <code>? super</code>; generics invariant.</li>
+          <li>ArrayList grow 1.5x; HashMap spread hash <code>h ^ (h&gt;&gt;&gt;16)</code>, treeify ≥8 &amp; table ≥64, resize lo/hi.</li>
+          <li>ConcurrentHashMap J8: CAS + synchronized per-bin, cấm null.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="erasure">
+      <h2 class="section-title"><span class="num">1</span> Generics &amp; type erasure sâu</h2>
+      <div class="block why">
+        <div class="block-label">Erasure làm gì</div>
+        <p>Generics chỉ tồn tại lúc compile để type-check, sau đó xoá: <code>List&lt;String&gt;</code> → <code>List</code>; <code>T</code> không bound → <code>Object</code>; <code>T extends Number</code> → <code>Number</code>. Compiler chèn cast tự động ở nơi lấy phần tử ra.</p>
+      </div>
+      <pre><code>List&lt;String&gt; l = <span class="tok-kw">new</span> ArrayList&lt;&gt;();
+String s = l.<span class="tok-fn">get</span>(<span class="tok-num">0</span>);   <span class="tok-com">// bytecode: invokeinterface get -> checkcast String</span></code></pre>
+      <p><code>checkcast</code> chèn ở điểm get ⇒ heap pollution (raw type nhét sai kiểu) nổ <code>ClassCastException</code> tại điểm <strong>lấy ra</strong>, không phải nhét vào.</p>
+      <table>
+        <tr><th>Không làm được</th><th>Vì sao</th></tr>
+        <tr><td><code>new T()</code></td><td>runtime không biết T</td></tr>
+        <tr><td><code>new T[n]</code></td><td>không tạo mảng type bị xoá</td></tr>
+        <tr><td><code>instanceof List&lt;String&gt;</code></td><td>runtime chỉ thấy List</td></tr>
+        <tr><td>overload <code>f(List&lt;String&gt;)</code> &amp; <code>f(List&lt;Integer&gt;)</code></td><td>sau erasure cùng chữ ký</td></tr>
+        <tr><td><code>T.class</code></td><td>không có class literal của type param</td></tr>
+      </table>
+      <div class="block best"><div class="block-label">Vượt giới hạn new T()</div><p>Truyền <code>Class&lt;T&gt; clazz</code> rồi <code>clazz.getDeclaredConstructor().newInstance()</code>, hoặc truyền <code>Supplier&lt;T&gt;</code>.</p></div>
+    </section>
+
+    <section id="bridge">
+      <h2 class="section-title"><span class="num">2</span> Bridge method</h2>
+      <pre><code><span class="tok-kw">class</span> Node&lt;T&gt; { <span class="tok-kw">void</span> <span class="tok-fn">set</span>(T value) {...} }
+<span class="tok-kw">class</span> StringNode <span class="tok-kw">extends</span> Node&lt;String&gt; {
+    @Override <span class="tok-kw">void</span> <span class="tok-fn">set</span>(String value) {...}   <span class="tok-com">// muốn override set(T)</span>
+}</code></pre>
+      <div class="block how">
+        <div class="block-label">Vì sao cần bridge</div>
+        <p>Sau erasure <code>Node.set</code> có chữ ký <code>set(Object)</code>, còn <code>StringNode.set(String)</code> khác tham số → không phải override. Compiler sinh <strong>bridge method</strong> synthetic: <code>set(Object o) { set((String) o); }</code> để nối <code>invokevirtual set(Object)</code> về <code>set(String)</code>, giữ đa hình. Thấy được qua <code>javap</code> — giải thích method "lạ" với tham số Object trong stack trace/reflection.</p>
+      </div>
+    </section>
+
+    <section id="pecs">
+      <h2 class="section-title"><span class="num">3</span> PECS &amp; variance</h2>
+      <div class="block why">
+        <div class="block-label">Generics invariant</div>
+        <p><code>List&lt;String&gt;</code> KHÔNG phải <code>List&lt;Object&gt;</code> (khác mảng covariant). Wildcards cho variance có kiểm soát.</p>
+      </div>
+      <pre><code><span class="tok-com">// PRODUCER extends: chỉ đọc ra</span>
+<span class="tok-kw">double</span> <span class="tok-fn">sum</span>(List&lt;? <span class="tok-kw">extends</span> Number&gt; src) {
+    <span class="tok-kw">for</span> (Number n : src) ...   <span class="tok-com">// src.add(x) KHÔNG compile</span>
+}
+<span class="tok-com">// CONSUMER super: chỉ ghi vào</span>
+<span class="tok-kw">void</span> <span class="tok-fn">addInts</span>(List&lt;? <span class="tok-kw">super</span> Integer&gt; dst) {
+    dst.<span class="tok-fn">add</span>(<span class="tok-num">1</span>);   <span class="tok-com">// đọc ra chỉ được Object</span>
+}</code></pre>
+      <table>
+        <tr><th>Muốn</th><th>Dùng</th><th>Đọc</th><th>Ghi</th></tr>
+        <tr><td>Producer</td><td><code>? extends T</code></td><td>ra T</td><td>chỉ null</td></tr>
+        <tr><td>Consumer</td><td><code>? super T</code></td><td>ra Object</td><td>T &amp; con</td></tr>
+        <tr><td>Cả hai</td><td><code>T</code> cụ thể</td><td>T</td><td>T</td></tr>
+      </table>
+      <p>Ví dụ chuẩn: <code>Collections.copy(List&lt;? super T&gt; dest, List&lt;? extends T&gt; src)</code>.</p>
+    </section>
+
+    <section id="reifiable">
+      <h2 class="section-title"><span class="num">4</span> Reifiable &amp; mảng generic</h2>
+      <div class="block why">
+        <div class="block-label">Reifiable là gì</div>
+        <p>Type mà runtime giữ đầy đủ thông tin (primitive, non-generic class, <code>List&lt;?&gt;</code>, Object). Generic parameterized type KHÔNG reifiable. Mảng covariant + reifiable → xung đột với generics.</p>
+      </div>
+      <pre><code>Object[] arr = <span class="tok-kw">new</span> String[<span class="tok-num">3</span>];
+arr[<span class="tok-num">0</span>] = <span class="tok-num">42</span>;   <span class="tok-com">// compile OK, RUNTIME ArrayStoreException</span>
+
+<span class="tok-com">// List&lt;String&gt;[] a = new List&lt;String&gt;[3];  // LỖI COMPILE</span>
+List&lt;String&gt;[] a = (List&lt;String&gt;[]) <span class="tok-kw">new</span> List[<span class="tok-num">3</span>];  <span class="tok-com">// unchecked, dễ heap pollution</span></code></pre>
+      <p>Ưu tiên <code>List&lt;List&lt;String&gt;&gt;</code> thay vì mảng của generic.</p>
+    </section>
+
+    <section id="arraylist">
+      <h2 class="section-title"><span class="num">5</span> ArrayList internals</h2>
+      <div class="dg">
+        <div class="dg-title">Grow 1.5x: newCap = oldCap + (oldCap &gt;&gt; 1)</div>
+        <div class="dg-row scroll">
+          <div class="node accent">10</div><div class="arrow-h acc"></div>
+          <div class="node">15</div><div class="arrow-h acc"></div>
+          <div class="node">22</div><div class="arrow-h acc"></div>
+          <div class="node">33</div><div class="arrow-h acc"></div>
+          <div class="node">49</div><div class="arrow-h acc"></div>
+          <div class="node muted">...</div>
+        </div>
+        <div class="dg-note">Default cap 10 (lazy, cấp ở add đầu). Copy bằng Arrays.copyOf O(n) nhưng amortized O(1)/add.</div>
+      </div>
+      <ul>
+        <li><code>add</code> cuối: amortized O(1). <code>add(index)/remove(index)</code>: O(n) do <code>System.arraycopy</code>.</li>
+        <li>Biết size trước → <code>new ArrayList&lt;&gt;(size)</code> tránh nhiều lần resize.</li>
+      </ul>
+      <div class="block how"><div class="block-label">modCount</div><p>Đếm số lần sửa cấu trúc. Iterator lưu expectedModCount lúc tạo, mỗi <code>next()</code> so sánh → khác thì ném <code>ConcurrentModificationException</code> (fail-fast).</p></div>
+    </section>
+
+    <section id="hashmap">
+      <h2 class="section-title"><span class="num">6</span> HashMap internals (Java 8+)</h2>
+      <div class="dg">
+        <div class="dg-title">hash → bucket → collision list → treeify</div>
+        <div class="dg-row scroll">
+          <div class="node accent">key</div>
+          <div class="arrow-h acc"><span class="arrow-lbl">(n-1) &amp; hash</span></div>
+          <div class="node">bucket[i]</div>
+          <div class="arrow-h"></div>
+          <div class="node orange">list<div class="sub">≥8 &amp; table≥64 → cây đỏ-đen</div></div>
+        </div>
+        <div class="dg-note">Load factor 0.75 → vượt thì resize gấp đôi. get/put trung bình O(1).</div>
+      </div>
+      <div class="block how">
+        <div class="block-label">Hàm spread hash</div>
+        <pre><code><span class="tok-kw">static final int</span> <span class="tok-fn">hash</span>(Object key) {
+    <span class="tok-kw">int</span> h;
+    <span class="tok-kw">return</span> (key == <span class="tok-kw">null</span>) ? <span class="tok-num">0</span> : (h = key.<span class="tok-fn">hashCode</span>()) ^ (h &gt;&gt;&gt; <span class="tok-num">16</span>);
+}</code></pre>
+        <p>Index = <code>(n-1) &amp; hash</code>. Vì n lũy thừa 2, <code>(n-1)</code> chỉ giữ bit thấp → hashCode khác ở bit cao thì cùng bucket. <code>h ^ (h&gt;&gt;&gt;16)</code> trộn bit cao xuống thấp → phân phối đều, chi phí 1 XOR.</p>
+      </div>
+      <div class="block why"><div class="block-label">Vì sao capacity lũy thừa 2</div><p>Dùng <code>(n-1) &amp; hash</code> thay <code>% n</code> — bit AND nhanh hơn chia. Chỉ đúng khi n lũy thừa 2 (mask liên tục bit thấp).</p></div>
+      <div class="block purpose">
+        <div class="block-label">Treeify &amp; resize (ngưỡng chính xác)</div>
+        <ul>
+          <li>Treeify khi bucket ≥ <b>8</b> (TREEIFY_THRESHOLD) VÀ table ≥ <b>64</b> (MIN_TREEIFY_CAPACITY). Table &lt; 64 → resize trước. Untreeify khi ≤ 6.</li>
+          <li>Ngưỡng 8 vì Poisson với hash tốt: xác suất bucket 8 phần tử ~6e-8 → treeify chỉ là van an toàn chống hash xấu/tấn công.</li>
+          <li>Resize J8: capacity gấp đôi; mỗi phần tử ở index cũ hoặc index cũ + oldCap (bit <code>hash &amp; oldCap</code>) → tách lo/hi, không rehash toàn bộ.</li>
+          <li>Load factor 0.75: thấp hơn → ít collision tốn RAM; cao hơn → tiết kiệm RAM nhiều collision.</li>
+        </ul>
+      </div>
+      <div class="block pitfall"><div class="block-label">Liên hệ equals/hashCode</div><p><code>get(key)</code>: tính hash → chọn bucket → duyệt tìm node <code>hash bằng &amp;&amp; (key==k || key.equals(k))</code>. Sai contract → tìm sai bucket/so sai → mất entry.</p></div>
+    </section>
+
+    <section id="chm">
+      <h2 class="section-title"><span class="num">7</span> ConcurrentHashMap</h2>
+      <div class="grid-2">
+        <div class="col"><h4>Java 7</h4><p>Chia 16 <b>Segment</b>, mỗi segment là HashTable con có lock riêng → concurrency level = số segment.</p></div>
+        <div class="col"><h4>Java 8</h4><p>Bỏ segment. Bucket rỗng thêm bằng <b>CAS</b> (lock-free); bucket có node thì <b>synchronized</b> trên node đầu bucket đó. size dùng CounterCell (LongAdder-style).</p></div>
+      </div>
+      <div class="block pitfall"><div class="block-label">Vì sao cấm null</div><p><code>get(k)==null</code> mơ hồ giữa "không có key" và "value null". Đa luồng không dùng containsKey phân biệt an toàn (race) → cấm cả null key lẫn value.</p></div>
+      <table>
+        <tr><th></th><th>HashMap</th><th>ConcurrentHashMap</th><th>Hashtable</th><th>synchronizedMap</th></tr>
+        <tr><td>Thread-safe</td><td>không</td><td>có</td><td>có</td><td>có</td></tr>
+        <tr><td>Khoá</td><td>—</td><td>CAS + sync per-bin</td><td>sync cả map</td><td>sync cả map</td></tr>
+        <tr><td>null</td><td>cho</td><td>không</td><td>không</td><td>cho</td></tr>
+        <tr><td>Đa luồng</td><td>—</td><td>cao</td><td>thấp</td><td>thấp</td></tr>
+      </table>
+    </section>
+
+    <section id="iterator">
+      <h2 class="section-title"><span class="num">8</span> Iterator: fail-fast vs fail-safe</h2>
+      <div class="block pitfall">
+        <div class="block-label">Fail-fast (ArrayList, HashMap)</div>
+        <p>Dựa <code>modCount</code>. Sửa cấu trúc khi duyệt (không qua iterator) → <code>ConcurrentModificationException</code> ở lần next() kế (best-effort).</p>
+        <pre><code><span class="tok-com">// SAI</span>
+<span class="tok-kw">for</span> (String s : list) <span class="tok-kw">if</span> (s.<span class="tok-fn">isEmpty</span>()) list.<span class="tok-fn">remove</span>(s);  <span class="tok-com">// CME</span>
+<span class="tok-com">// ĐÚNG</span>
+list.<span class="tok-fn">removeIf</span>(String::isEmpty);   <span class="tok-com">// hoặc iterator.remove()</span></code></pre>
+      </div>
+      <div class="block how">
+        <div class="block-label">Fail-safe</div>
+        <p><b>CopyOnWriteArrayList</b>: ghi copy cả mảng, iterator duyệt snapshot cũ → không CME nhưng không thấy thay đổi mới, ghi O(n) → chỉ hợp đọc nhiều ghi rất ít. <b>ConcurrentHashMap iterator</b>: weakly consistent, không ném CME.</p>
+      </div>
+    </section>
+
+    <section id="followup">
+      <h2 class="section-title"><span class="num">9</span> Follow-up questions</h2>
+      <div class="block purpose">
+        <div class="block-label">Interviewer hay đào tiếp</div>
+        <ul>
+          <li>Bridge method sinh khi nào? → override generic method sau erasure.</li>
+          <li>Vì sao không <code>new List&lt;String&gt;[n]</code>? → generic non-reifiable + mảng reifiable.</li>
+          <li>Treeify khi nào, vì sao ngưỡng 8? → bucket ≥8 &amp; table ≥64; Poisson.</li>
+          <li>Resize J8 tối ưu rehash thế nào? → tách lo/hi bằng <code>hash &amp; oldCap</code>.</li>
+          <li>Vì sao <code>h ^ (h&gt;&gt;&gt;16)</code>? → trộn bit cao xuống thấp.</li>
+          <li>CHM J8 khoá gì? → CAS bucket rỗng, synchronized node đầu bucket.</li>
+          <li>Vì sao CHM cấm null? → mơ hồ "không có key" vs "value null".</li>
+          <li>ArrayList grow bao nhiêu? → 1.5x, default cap 10 lazy.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Type erasure làm gì với T và T extends Number?</span><span class="icon">+</span></div>
+        <div class="a"><p>T không bound → erase về Object; T extends Number → erase về Number (bound đầu tiên). Compiler chèn checkcast ở nơi lấy phần tử ra. Runtime không còn thông tin generic.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao ClassCastException do heap pollution nổ ở điểm lấy ra?</span><span class="icon">+</span></div>
+        <div class="a"><p>Compiler chèn checkcast tại điểm get chứ không phải add. Dùng raw type nhét sai kiểu qua được compile, tới khi get + cast mới nổ CCE.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Bridge method là gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Method synthetic compiler sinh khi override generic method. Sau erasure Node.set(T)→set(Object) nhưng StringNode.set(String) khác chữ ký; compiler sinh bridge set(Object){set((String)o);} để giữ đa hình.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Làm sao vượt giới hạn new T() do erasure?</span><span class="icon">+</span></div>
+        <div class="a"><p>Truyền Class&lt;T&gt; rồi clazz.getDeclaredConstructor().newInstance(), hoặc truyền Supplier&lt;T&gt;. Runtime không biết T nên cần thông tin type từ bên ngoài.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Generics của Java invariant nghĩa là gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>List&lt;String&gt; KHÔNG phải List&lt;Object&gt; (không gán được), khác mảng covariant. Muốn variance dùng wildcard: ? extends (covariant, đọc), ? super (contravariant, ghi).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao mảng generic bị cấm?</span><span class="icon">+</span></div>
+        <div class="a"><p>Mảng reifiable + covariant (nhớ type runtime, ném ArrayStoreException). Generic non-reifiable (erasure). Kết hợp phá type safety không phát hiện được runtime → compiler cấm new List&lt;String&gt;[n].</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>PECS đầy đủ?</span><span class="icon">+</span></div>
+        <div class="a"><p>Producer Extends Consumer Super. ? extends T: đọc ra T, chỉ ghi null. ? super T: ghi T, đọc ra Object. Vừa đọc vừa ghi: T cụ thể. VD Collections.copy(List&lt;? super T&gt; dest, List&lt;? extends T&gt; src).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>ArrayList grow bao nhiêu mỗi lần?</span><span class="icon">+</span></div>
+        <div class="a"><p>newCap = oldCap + (oldCap &gt;&gt; 1) = 1.5x. Default cap 10 (lazy). Copy bằng Arrays.copyOf O(n) nhưng amortized O(1)/add. Biết size trước thì new ArrayList&lt;&gt;(size).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>add(index)/remove(index) của ArrayList phức tạp bao nhiêu?</span><span class="icon">+</span></div>
+        <div class="a"><p>O(n) vì System.arraycopy dịch các phần tử sau vị trí. get/set O(1). add cuối amortized O(1). ArrayList vẫn thắng LinkedList nhờ cache locality.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Index bucket HashMap tính thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>(n-1) &amp; hash(key) với n là capacity (lũy thừa 2). Dùng bit AND thay % vì nhanh hơn; chỉ đúng khi n lũy thừa 2.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao HashMap dùng h ^ (h &gt;&gt;&gt; 16)?</span><span class="icon">+</span></div>
+        <div class="a"><p>Index chỉ dùng bit thấp (n-1)&amp;hash. Nếu hashCode khác nhau chỉ ở bit cao thì cùng bucket → collision. XOR dịch 16 trộn bit cao xuống thấp để phân phối đều, chi phí 1 XOR.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Treeify khi nào? Vì sao ngưỡng 8?</span><span class="icon">+</span></div>
+        <div class="a"><p>Bucket ≥8 phần tử VÀ table ≥64 → cây đỏ-đen (O(log k)). Table&lt;64 thì resize trước. Ngưỡng 8 vì Poisson với hash tốt: xác suất bucket 8 phần tử ~6e-8 → van chống hash xấu/tấn công.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Resize Java 8 tối ưu rehash thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Capacity gấp đôi. Mỗi phần tử ở index cũ hoặc index cũ + oldCap, quyết định bằng 1 bit hash &amp; oldCap. Tách list thành 2 (lo/hi) mà không tính lại hash toàn bộ.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Load factor 0.75 đánh đổi gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>size &gt; cap*0.75 thì resize. Thấp hơn → ít collision nhưng tốn RAM, resize sớm. Cao hơn → tiết kiệm RAM nhưng nhiều collision, tra cứu chậm. 0.75 cân bằng thời gian/không gian.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>ConcurrentHashMap Java 8 khoá gì (khác Java 7)?</span><span class="icon">+</span></div>
+        <div class="a"><p>Java 7 chia 16 Segment mỗi cái có lock. Java 8 bỏ segment: bucket rỗng thêm bằng CAS (lock-free); bucket có node thì synchronized trên node đầu bucket → chỉ khoá 1 bucket, các bucket khác song song.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao ConcurrentHashMap cấm null?</span><span class="icon">+</span></div>
+        <div class="a"><p>get(k)==null mơ hồ giữa "không có key" và "value null". Đa luồng không thể dùng containsKey phân biệt an toàn (race). Nên cấm cả null key và null value.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>ConcurrentHashMap đếm size thế nào để tránh contention?</span><span class="icon">+</span></div>
+        <div class="a"><p>Dùng mảng CounterCell (kiểu LongAdder): mỗi thread cộng vào cell riêng, size = baseCount + tổng các cell. Tránh mọi thread tranh một biến counter chung.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Fail-fast dựa vào gì? Có đảm bảo không?</span><span class="icon">+</span></div>
+        <div class="a"><p>Dựa modCount. Iterator lưu expectedModCount, mỗi next() so sánh, khác thì ném ConcurrentModificationException. Best-effort, KHÔNG đảm bảo phát hiện mọi trường hợp.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Xóa phần tử khi duyệt sao cho đúng?</span><span class="icon">+</span></div>
+        <div class="a"><p>Dùng Iterator.remove() (cập nhật cả modCount và expectedModCount), hoặc list.removeIf(predicate), hoặc duyệt bản copy. Không dùng for-each rồi collection.remove() (gây CME).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>CopyOnWriteArrayList phù hợp khi nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Đọc nhiều, ghi cực ít (listener list, config). Ghi copy toàn mảng O(n); đọc lock-free trên snapshot. Iterator không ném CME nhưng không thấy thay đổi sau khi tạo.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>ArrayList vs LinkedList?</span><span class="icon">+</span></div>
+        <div class="a"><p>ArrayList mảng động: get O(1), cache locality tốt. LinkedList: thêm/xóa đầu-cuối O(1) nhưng get(i) O(n), tốn bộ nhớ node. Thực tế gần như luôn dùng ArrayList.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="week1.html"><span class="dir">← Trước</span><span class="title">Week 1 · Core &amp; OOP</span></a>
+      <a href="week3.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 3 · Functional/Streams</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 8 – Spring, System Design &amp; Mock (Deep Dive) | Senior Java</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Java knowledge</div></a>
+      <div class="sub">Deep Dive</div>
+    </div>
+    <h2>Week 8 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#lifecycle">1. IoC &amp; bean lifecycle</a>
+      <a href="#di">2. Dependency injection</a>
+      <a href="#scope">3. Scope &amp; circular</a>
+      <a href="#aop">4. Spring AOP &amp; proxy</a>
+      <a href="#tx">5. @Transactional internals</a>
+      <a href="#autoconfig">6. Auto-configuration</a>
+      <a href="#rest">7. REST &amp; exception</a>
+      <a href="#design">8. System design</a>
+      <a href="#followup">9. Follow-up</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html">Week 1 · Core &amp; OOP</a>
+      <a href="week2.html">Week 2 · Generics/Collections</a>
+      <a href="week3.html">Week 3 · Functional/Streams</a>
+      <a href="week4.html">Week 4 · Concurrency</a>
+      <a href="week5.html">Week 5 · JVM/GC</a>
+      <a href="week6.html">Week 6 · Modern Java/IO</a>
+      <a href="week7.html">Week 7 · Build/Testing</a>
+      <a href="week8.html" class="active">Week 8 · Spring/Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 8 · Deep Dive</span>
+      <h1>Spring, System Design &amp; Mock</h1>
+      <p>Spring container khởi tạo bean thế nào, proxy (JDK dynamic vs CGLIB) sau @Transactional/AOP, auto-configuration hoạt động ra sao, và khung system design.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★★</b><span>Priority</span></div>
+        <div class="item"><b>8</b><span>Chủ đề</span></div>
+        <div class="item"><b>~10h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <div class="tldr">
+        <div class="label">TL;DR</div>
+        <ul>
+          <li>Proxy AOP tạo ở <code>postProcessAfterInitialization</code> → self-invocation bỏ qua proxy.</li>
+          <li>Constructor injection: final, dễ test, circular dep fail fast.</li>
+          <li>JDK dynamic proxy (interface) vs CGLIB (subclass, mặc định Boot); final không proxy được.</li>
+          <li>@Transactional rollback RuntimeException; propagation REQUIRED/REQUIRES_NEW.</li>
+          <li>Auto-config: @EnableAutoConfiguration + @Conditional theo classpath.</li>
+          <li>System design: yêu cầu → API → data model → scale → bottleneck.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="lifecycle">
+      <h2 class="section-title"><span class="num">1</span> IoC container &amp; bean lifecycle</h2>
+      <div class="dg">
+        <div class="dg-title">Bean lifecycle (proxy AOP tạo ở đâu?)</div>
+        <div class="dg-row scroll">
+          <div class="node accent">Instantiate</div>
+          <div class="arrow-h acc"></div>
+          <div class="node">Populate (DI)</div>
+          <div class="arrow-h acc"></div>
+          <div class="node">Aware callbacks</div>
+          <div class="arrow-h acc"></div>
+          <div class="node green">@PostConstruct</div>
+          <div class="arrow-h acc"></div>
+          <div class="node orange">PostProcess.after<div class="sub">AOP PROXY tạo ở đây</div></div>
+        </div>
+        <div class="dg-note">Sau đó bean sẵn sàng; @PreDestroy/destroy khi context đóng.</div>
+      </div>
+      <div class="block pitfall"><div class="block-label">Điểm mấu chốt</div><p>Proxy AOP được tạo ở <b>postProcessAfterInitialization</b>. Đây là lý do <code>@Transactional</code>/<code>@Async</code> không hoạt động khi tự gọi trong cùng bean (self-invocation) — gọi trực tiếp <code>this</code>, không qua proxy. <b>BeanPostProcessor</b> là hook mở rộng mạnh nhất (AOP, @Autowired resolution đều là BeanPostProcessor).</p></div>
+    </section>
+
+    <section id="di">
+      <h2 class="section-title"><span class="num">2</span> Dependency injection</h2>
+      <pre><code>@Service
+<span class="tok-kw">class</span> OrderService {
+    <span class="tok-kw">private final</span> PaymentGateway gateway;    <span class="tok-com">// final -> bất biến</span>
+    OrderService(PaymentGateway gateway) {   <span class="tok-com">// constructor injection (KHUYẾN NGHỊ)</span>
+        <span class="tok-kw">this</span>.gateway = gateway;
+    }
+}</code></pre>
+      <table>
+        <tr><th>Kiểu</th><th>final</th><th>Test không Spring</th><th>Circular dep</th></tr>
+        <tr><td><b>Constructor</b></td><td>✓</td><td>dễ (new + mock)</td><td>phát hiện sớm (fail fast)</td></tr>
+        <tr><td>Field (@Autowired)</td><td>✗</td><td>khó (reflection)</td><td>ẩn, dễ vô tình</td></tr>
+        <tr><td>Setter</td><td>✗</td><td>trung bình</td><td>cho phép</td></tr>
+      </table>
+      <p>Từ Spring 4.3, class có 1 constructor thì không cần <code>@Autowired</code>. Constructor injection là best practice.</p>
+    </section>
+
+    <section id="scope">
+      <h2 class="section-title"><span class="num">3</span> Bean scope &amp; circular dependency</h2>
+      <div class="block why"><div class="block-label">Scope</div><p><code>singleton</code> (mặc định): một instance toàn container → phải <b>stateless/thread-safe</b>. <code>prototype</code>: mỗi lần lấy tạo mới. Web: request, session, application.</p></div>
+      <div class="block pitfall">
+        <div class="block-label">Circular dependency</div>
+        <p><b>Constructor injection</b> cả hai chiều → Spring không giải được → <code>BeanCurrentlyInCreationException</code> lúc khởi động (fail fast — tốt). <b>Field/setter singleton</b> → giải được nhờ early reference (tiêm instance chưa init xong) → che giấu vấn đề thiết kế. Xử lý đúng: thiết kế lại, hoặc @Lazy/ObjectProvider.</p>
+      </div>
+    </section>
+
+    <section id="aop">
+      <h2 class="section-title"><span class="num">4</span> Spring AOP &amp; proxy</h2>
+      <div class="block how"><div class="block-label">Proxy-based AOP</div><p>Spring AOP dùng <b>runtime proxy</b> (không weaving bytecode như AspectJ). Bean có aspect (@Transactional, @Async, @Cacheable) → container thay bean thật bằng proxy bọc ngoài, chèn advice trước/sau method.</p></div>
+      <table>
+        <tr><th></th><th>JDK dynamic proxy</th><th>CGLIB</th></tr>
+        <tr><td>Cơ chế</td><td>implement interface</td><td>sinh subclass của class</td></tr>
+        <tr><td>Điều kiện</td><td>bean có interface</td><td>không cần interface</td></tr>
+        <tr><td>Giới hạn</td><td>chỉ method của interface</td><td>không proxy final/private</td></tr>
+        <tr><td>Spring Boot</td><td>—</td><td>mặc định (proxyTargetClass=true)</td></tr>
+      </table>
+      <div class="block pitfall">
+        <div class="block-label">Self-invocation không hoạt động</div>
+        <pre><code>@Service <span class="tok-kw">class</span> UserService {
+    <span class="tok-kw">public void</span> <span class="tok-fn">outer</span>() { <span class="tok-fn">inner</span>(); }           <span class="tok-com">// this.inner() -> KHÔNG qua proxy</span>
+    @Transactional <span class="tok-kw">public void</span> <span class="tok-fn">inner</span>() {...}  <span class="tok-com">// annotation bị bỏ qua!</span>
+}</code></pre>
+        <p>Proxy chỉ chặn lời gọi <b>từ ngoài vào</b>. <code>this.inner()</code> gọi thẳng object thật → không mở transaction. Fix: tách bean khác, self-inject, hoặc <code>AopContext.currentProxy()</code>.</p>
+      </div>
+    </section>
+
+    <section id="tx">
+      <h2 class="section-title"><span class="num">5</span> @Transactional internals</h2>
+      <div class="block how"><div class="block-label">Cơ chế</div><p>Advice <code>TransactionInterceptor</code> (qua proxy) bọc method: mở transaction (hoặc join) trước, commit nếu thành công, rollback nếu ném exception.</p></div>
+      <div class="block pitfall">
+        <div class="block-label">Rollback rule + 4 bẫy</div>
+        <ul>
+          <li>Mặc định rollback với <code>RuntimeException</code> + <code>Error</code>; KHÔNG rollback checked exception (cần <code>rollbackFor</code>).</li>
+          <li>Self-invocation (mục 4).</li>
+          <li>Method private/non-public → proxy không chặn → vô hiệu.</li>
+          <li>Nuốt exception bên trong → transaction không thấy lỗi → không rollback.</li>
+        </ul>
+      </div>
+      <div class="block how"><div class="block-label">Propagation</div><p><b>REQUIRED</b> (mặc định): join hoặc tạo mới. <b>REQUIRES_NEW</b>: suspend transaction ngoài, tạo mới độc lập (audit log). <b>NESTED</b>: savepoint. SUPPORTS/MANDATORY/NEVER...</p></div>
+    </section>
+
+    <section id="autoconfig">
+      <h2 class="section-title"><span class="num">6</span> Spring Boot auto-configuration</h2>
+      <div class="block how">
+        <div class="block-label">Cơ chế</div>
+        <p><code>@SpringBootApplication</code> = <code>@Configuration</code> + <code>@ComponentScan</code> + <code>@EnableAutoConfiguration</code>. <code>@EnableAutoConfiguration</code> nạp danh sách auto-config class từ <code>AutoConfiguration.imports</code> (Boot 2.7+). Mỗi class dùng <b>@Conditional</b>:</p>
+        <ul>
+          <li><code>@ConditionalOnClass</code> — có class X trên classpath (vd DataSource → cấu hình JDBC).</li>
+          <li><code>@ConditionalOnMissingBean</code> — chỉ tạo nếu user chưa định nghĩa → cho phép override.</li>
+          <li><code>@ConditionalOnProperty</code> — bật theo config.</li>
+        </ul>
+      </div>
+      <div class="block best"><div class="block-label">Override auto-configured bean</div><p>Định nghĩa bean cùng kiểu; <code>@ConditionalOnMissingBean</code> khiến auto-config nhường. Starter chỉ là gói dependency → classpath có gì thì auto-config kích hoạt cái đó.</p></div>
+    </section>
+
+    <section id="rest">
+      <h2 class="section-title"><span class="num">7</span> REST &amp; exception handling</h2>
+      <pre><code>@RestController @RequestMapping(<span class="tok-str">"/api/users"</span>)
+<span class="tok-kw">class</span> UserController {
+    @GetMapping(<span class="tok-str">"/{id}"</span>) UserDto <span class="tok-fn">get</span>(@PathVariable <span class="tok-kw">long</span> id) {...}
+    @PostMapping @ResponseStatus(HttpStatus.CREATED)
+    UserDto <span class="tok-fn">create</span>(@RequestBody @Valid CreateUserRequest req) {...}
+}
+@RestControllerAdvice
+<span class="tok-kw">class</span> ApiExceptionHandler {
+    @ExceptionHandler(NotFoundException.<span class="tok-kw">class</span>) @ResponseStatus(HttpStatus.NOT_FOUND)
+    ErrorResponse <span class="tok-fn">handle</span>(NotFoundException e) {...}
+}</code></pre>
+      <p><code>@RestController</code> = <code>@Controller</code> + <code>@ResponseBody</code> (JSON qua Jackson). <code>@RestControllerAdvice</code> gom xử lý exception tập trung. <code>@Valid</code> + Bean Validation. <b>Không trả entity Hibernate trực tiếp</b> → dùng DTO.</p>
+    </section>
+
+    <section id="design">
+      <h2 class="section-title"><span class="num">8</span> System design</h2>
+      <div class="steps">
+        <div class="step"><div class="step-title">Làm rõ yêu cầu</div>QPS, data size, đọc/ghi, ràng buộc.</div>
+        <div class="step"><div class="step-title">API + data model</div>REST/gRPC, resource, schema.</div>
+        <div class="step"><div class="step-title">High-level architecture</div>service, DB, cache, queue.</div>
+        <div class="step"><div class="step-title">Đi sâu bottleneck</div>DB (replica/shard), cache, message queue.</div>
+        <div class="step"><div class="step-title">Trade-off</div>consistency vs availability, sync vs async.</div>
+      </div>
+      <div class="block best"><div class="block-label">Microservices resilience</div><p><b>Circuit breaker</b> (Resilience4j): sau ngưỡng lỗi "mở" → fail nhanh, thử lại sau (half-open) → tránh cascade failure. Retry + timeout + bulkhead. API gateway. REST/gRPC (sync) vs Kafka/RabbitMQ (async, decoupling, eventual consistency).</p></div>
+      <div class="block purpose"><div class="block-label">Scalability &amp; idempotency</div><p>Service <b>stateless</b> → scale ngang sau load balancer; state đẩy ra Redis/DB. <b>Idempotency key</b> cho POST (payment): lưu key + kết quả, nhận lại key đã xử lý → trả kết quả cũ → an toàn khi retry (tránh double charge). Observability: metrics (Micrometer/Prometheus), tracing (OpenTelemetry), health check.</p></div>
+    </section>
+
+    <section id="followup">
+      <h2 class="section-title"><span class="num">9</span> Follow-up questions</h2>
+      <div class="block purpose">
+        <div class="block-label">Interviewer hay đào tiếp</div>
+        <ul>
+          <li>Proxy AOP tạo ở bước nào? → postProcessAfterInitialization.</li>
+          <li>Vì sao self-invocation @Transactional không hoạt động? → gọi this bỏ qua proxy.</li>
+          <li>JDK dynamic proxy vs CGLIB? → interface vs subclass; CGLIB không proxy final.</li>
+          <li>@Transactional rollback checked exception? → không, cần rollbackFor.</li>
+          <li>Vì sao constructor injection tốt hơn field? → final, dễ test, circular fail fast.</li>
+          <li>Circular dep constructor vs field? → constructor fail fast; field early reference.</li>
+          <li>Auto-configuration hoạt động thế nào? → @EnableAutoConfiguration + @Conditional.</li>
+          <li>Override auto-configured bean? → định nghĩa bean cùng kiểu (@ConditionalOnMissingBean).</li>
+          <li>Circuit breaker giải quyết gì? → fail nhanh khi downstream lỗi, tránh cascade.</li>
+          <li>Vì sao không trả entity ra REST? → lazy proxy + circular reference; dùng DTO.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Bean lifecycle của Spring theo thứ tự nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Instantiate (constructor) → populate properties (DI) → Aware callbacks → BeanPostProcessor.before → @PostConstruct/afterPropertiesSet → BeanPostProcessor.after (AOP PROXY tạo ở đây) → sẵn sàng → @PreDestroy/destroy khi context đóng.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Proxy AOP được tạo ở bước nào? Hệ quả?</span><span class="icon">+</span></div>
+        <div class="a"><p>Ở postProcessAfterInitialization (BeanPostProcessor). Hệ quả: self-invocation (this.method()) bỏ qua proxy vì gọi thẳng object thật → @Transactional/@Async trong cùng bean không hoạt động.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>BeanPostProcessor là gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Hook mở rộng mạnh nhất của Spring: chạy before/after mỗi bean init. AOP proxy, @Autowired resolution đều là BeanPostProcessor. Cho phép sửa/bọc bean trước khi dùng.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao constructor injection tốt hơn field injection?</span><span class="icon">+</span></div>
+        <div class="a"><p>Cho phép field final (bất biến), dependency rõ ràng và bắt buộc (compiler ép), dễ test đơn vị (new + mock, không cần Spring/reflection), và phát hiện circular dependency sớm lúc khởi động.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Circular dependency: constructor vs field injection?</span><span class="icon">+</span></div>
+        <div class="a"><p>Constructor injection cả hai chiều → Spring không giải được → BeanCurrentlyInCreationException (fail fast, tốt). Field/setter singleton → giải được nhờ early reference (tiêm instance chưa init xong) → che giấu vấn đề thiết kế.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Bean scope mặc định? Điều kiện?</span><span class="icon">+</span></div>
+        <div class="a"><p>Singleton — một instance trên toàn container, chia sẻ cho mọi nơi. Vì thế bean singleton PHẢI stateless/thread-safe. Scope khác: prototype (mỗi lần lấy tạo mới), request, session.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>JDK dynamic proxy vs CGLIB?</span><span class="icon">+</span></div>
+        <div class="a"><p>JDK proxy implement interface (Proxy class). CGLIB sinh subclass của class (không cần interface, nhưng không proxy được final/private). Spring Boot mặc định CGLIB (proxyTargetClass=true).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao @Transactional self-invocation không hoạt động?</span><span class="icon">+</span></div>
+        <div class="a"><p>Spring AOP dùng proxy bọc ngoài; proxy chỉ chặn lời gọi TỪ NGOÀI. Gọi this.method() trong cùng bean đi thẳng object thật, bỏ qua proxy → advice (transaction) không chạy. Fix: tách bean khác hoặc self-inject.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>@Transactional trên private method có tác dụng không?</span><span class="icon">+</span></div>
+        <div class="a"><p>Không. Proxy (JDK interface hoặc CGLIB subclass) chỉ chặn được public method gọi từ ngoài. private/final/non-public method không bị proxy chặn → annotation vô hiệu.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>@Transactional rollback khi nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Mặc định rollback với RuntimeException và Error; commit khi thành công. Checked exception KHÔNG rollback (cần rollbackFor). Bẫy: nuốt exception bên trong → transaction không thấy lỗi → commit.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>REQUIRED vs REQUIRES_NEW?</span><span class="icon">+</span></div>
+        <div class="a"><p>REQUIRED (mặc định): join transaction hiện có hoặc tạo mới. REQUIRES_NEW: suspend transaction ngoài, tạo transaction mới độc lập → commit dù transaction ngoài rollback (dùng cho audit log).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Spring Boot auto-configuration hoạt động thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>@EnableAutoConfiguration nạp danh sách config class (từ AutoConfiguration.imports). Mỗi class dùng @Conditional: @ConditionalOnClass (có class trên classpath), @ConditionalOnMissingBean (chỉ tạo nếu user chưa định nghĩa), @ConditionalOnProperty. Classpath có gì thì kích hoạt cái đó.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Làm sao override một auto-configured bean?</span><span class="icon">+</span></div>
+        <div class="a"><p>Định nghĩa bean cùng kiểu trong config của bạn. Auto-config dùng @ConditionalOnMissingBean nên sẽ nhường (không tạo bean mặc định nữa).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>@SpringBootApplication gồm gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>@Configuration + @ComponentScan + @EnableAutoConfiguration. Quét component trong package, bật auto-config, và bản thân là config class.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Circuit breaker giải quyết gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Khi downstream lỗi liên tục, breaker "mở" → fail nhanh không chờ timeout, thử lại sau (half-open). Tránh cascade failure và cạn tài nguyên (thread/connection chờ service chết). Dùng Resilience4j.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Đồng bộ (REST/gRPC) vs bất đồng bộ (queue) khi nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>REST/gRPC khi cần phản hồi ngay, coupling chấp nhận được. Queue (Kafka/RabbitMQ) khi cần decoupling, chịu tải đỉnh (buffer), fan-out sự kiện, xử lý async — đổi lại phức tạp hơn và eventual consistency.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Làm service scale ngang thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Giữ stateless (đẩy state ra Redis/DB, không session cục bộ), đặt sau load balancer, DB read replica/sharding + pool đúng size, tác vụ nặng đẩy queue xử lý async, observability đầy đủ.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Idempotency key dùng để làm gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Client gửi key duy nhất cho mỗi thao tác (vd payment). Server lưu key + kết quả; nếu nhận lại key đã xử lý → trả kết quả cũ thay vì thực thi lại → an toàn khi client retry (tránh double charge).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Cấu trúc trả lời một bài system design?</span><span class="icon">+</span></div>
+        <div class="a"><p>Làm rõ yêu cầu &amp; scale (QPS, data size) → định nghĩa API → data model → high-level architecture → đi sâu bottleneck (DB/cache/queue) → bàn trade-off. Không nhảy vào chi tiết trước khi chốt phạm vi.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="week7.html"><span class="dir">← Trước</span><span class="title">Week 7 · Build/Testing</span></a>
+      <a href="index.html" class="next"><span class="dir">Hoàn thành →</span><span class="title">Study Hub</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

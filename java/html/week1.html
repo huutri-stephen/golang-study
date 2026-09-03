@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 1 – Java Core &amp; OOP (Deep Dive) | Senior Java</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Java knowledge</div></a>
+      <div class="sub">Deep Dive</div>
+    </div>
+    <h2>Week 1 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#types">1. Type system &amp; bộ nhớ</a>
+      <a href="#bytecode">2. == vs equals (bytecode)</a>
+      <a href="#autobox">3. Autoboxing &amp; Integer cache</a>
+      <a href="#string">4. String</a>
+      <a href="#oop">5. OOP internals</a>
+      <a href="#interface">6. interface vs abstract</a>
+      <a href="#contracts">7. equals/hashCode</a>
+      <a href="#exceptions">8. Exceptions</a>
+      <a href="#followup">9. Follow-up</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html" class="active">Week 1 · Core &amp; OOP</a>
+      <a href="week2.html">Week 2 · Generics/Collections</a>
+      <a href="week3.html">Week 3 · Functional/Streams</a>
+      <a href="week4.html">Week 4 · Concurrency</a>
+      <a href="week5.html">Week 5 · JVM/GC</a>
+      <a href="week6.html">Week 6 · Modern Java/IO</a>
+      <a href="week7.html">Week 7 · Build/Testing</a>
+      <a href="week8.html">Week 8 · Spring/Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 1 · Deep Dive</span>
+      <h1>Java Core &amp; OOP</h1>
+      <p>Đi tới tận bytecode và bố cục bộ nhớ object. Ở mức senior, câu hỏi là "điều gì xảy ra ở mức JVM khi gọi equals", "Integer chiếm bao nhiêu byte", "String pool nằm ở đâu".</p>
+      <div class="meta">
+        <div class="item"><b>★★★★★</b><span>Priority</span></div>
+        <div class="item"><b>8</b><span>Chủ đề</span></div>
+        <div class="item"><b>~8h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <div class="tldr">
+        <div class="label">TL;DR</div>
+        <ul>
+          <li><code>==</code> → bytecode <code>if_acmp*</code> (so địa chỉ); <code>.equals()</code> → <code>invokevirtual</code> (nội dung).</li>
+          <li><code>new Object()</code> = 16B; <code>Integer</code> = 16B vs <code>int</code> 4B → autoboxing tốn ~4x.</li>
+          <li>Integer cache -128..127; luôn <code>.equals()</code> cho wrapper.</li>
+          <li>String immutable (final class + final value); pool trong heap; concat J9+ dùng invokedynamic.</li>
+          <li>equals/hashCode contract: bằng nhau ⇒ cùng hashCode; quên hashCode = bug HashMap.</li>
+          <li>Exception đắt ở <code>fillInStackTrace</code>; không dùng cho control flow.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="types">
+      <h2 class="section-title"><span class="num">1</span> Type system &amp; bộ nhớ object</h2>
+      <table>
+        <tr><th>Type</th><th>Bits</th><th>Ghi chú</th></tr>
+        <tr><td><code>boolean</code></td><td>JVM không định nghĩa</td><td>thường 1B, mảng có thể bit-packed</td></tr>
+        <tr><td><code>byte</code> / <code>short</code></td><td>8 / 16</td><td></td></tr>
+        <tr><td><code>char</code></td><td>16</td><td><strong>unsigned</strong> 0..65535 (UTF-16)</td></tr>
+        <tr><td><code>int</code> / <code>long</code></td><td>32 / 64</td><td></td></tr>
+        <tr><td><code>float</code> / <code>double</code></td><td>32 / 64</td><td>IEEE-754</td></tr>
+      </table>
+      <p>Primitive nằm trực tiếp trên stack (biến local) hoặc inline trong object. Reference là con trỏ được quản lý (4B khi <strong>compressed oops</strong> heap &lt; 32GB, 8B nếu không).</p>
+
+      <h4>Bố cục object trên heap (HotSpot 64-bit)</h4>
+      <div class="dg">
+        <div class="dg-title">object = header + fields + padding (alignment 8 byte)</div>
+        <div class="dg-row scroll">
+          <div class="node accent">Mark Word<div class="sub">8B: hashCode, GC age, lock</div></div>
+          <div class="node accent">Klass Ptr<div class="sub">4B: trỏ metadata (Metaspace)</div></div>
+          <div class="node muted">[Array length]<div class="sub">4B, chỉ với mảng</div></div>
+          <div class="node green">Fields<div class="sub">int 4B, long 8B, ref 4/8B</div></div>
+          <div class="node orange">Padding<div class="sub">đệm bội số 8</div></div>
+        </div>
+        <div class="dg-note"><code>new Object()</code> = 12B header + 4 pad = <b>16B</b>. <code>Integer</code> = 12 + 4 (int) = <b>16B</b> vs <code>int</code> chỉ 4B.</div>
+      </div>
+      <div class="block why">
+        <div class="block-label">Mark word &amp; klass pointer</div>
+        <p>Mark word giữ identity hashCode (lazy — tính lần đầu khi cần), thông tin lock (biased/lightweight/heavyweight), GC age. Klass pointer trỏ metadata class trong Metaspace. Mọi object alignment 8 byte.</p>
+      </div>
+      <div class="block best">
+        <div class="block-label">int[] vs Integer[] trong hot path</div>
+        <p><code>int[]</code> lưu 4B/phần tử liền mạch (cache-friendly). <code>Integer[]</code> lưu reference trỏ tới các Integer 16B rải rác → tốn RAM, nhiều cache miss, áp lực GC. Hot path dùng primitive array.</p>
+      </div>
+    </section>
+
+    <section id="bytecode">
+      <h2 class="section-title"><span class="num">2</span> == vs equals ở mức bytecode</h2>
+      <pre><code>String a = <span class="tok-kw">new</span> String(<span class="tok-str">"hi"</span>);
+String b = <span class="tok-kw">new</span> String(<span class="tok-str">"hi"</span>);
+a == b;        <span class="tok-com">// false</span>
+a.<span class="tok-fn">equals</span>(b);   <span class="tok-com">// true</span></code></pre>
+      <div class="block how">
+        <div class="block-label">Bytecode (javap -c, rút gọn)</div>
+        <pre><code><span class="tok-com">// a == b  -> so sánh 2 reference</span>
+aload_1
+aload_2
+if_acmpne  ...        <span class="tok-com">// reference compare (ĐỊA CHỈ)</span>
+
+<span class="tok-com">// a.equals(b) -> virtual method</span>
+invokevirtual java/lang/String.equals</code></pre>
+      </div>
+      <ul>
+        <li><code>==</code> → <code>if_acmpeq/if_acmpne</code> (reference); primitive → <code>if_icmpeq</code> (int) / <code>lcmp</code> (long).</li>
+        <li><code>.equals()</code> → <code>invokevirtual</code> (dynamic dispatch, chạy code override).</li>
+      </ul>
+      <div class="block pitfall">
+        <div class="block-label">Vì sao nhầm lẫn nguy hiểm</div>
+        <p><code>==</code> trên wrapper/String đôi khi đúng do trùng cache/pool → tạo ảo giác code chạy được rồi vỡ ở dữ liệu khác. Bug âm thầm.</p>
+      </div>
+    </section>
+
+    <section id="autobox">
+      <h2 class="section-title"><span class="num">3</span> Autoboxing &amp; Integer cache</h2>
+      <pre><code>Integer x = <span class="tok-num">100</span>;   <span class="tok-com">// compiler chèn Integer.valueOf(100)</span>
+<span class="tok-kw">int</span> y = x;        <span class="tok-com">// compiler chèn x.intValue()</span></code></pre>
+      <div class="block how">
+        <div class="block-label">IntegerCache (diễn giải)</div>
+        <pre><code><span class="tok-kw">public static</span> Integer <span class="tok-fn">valueOf</span>(<span class="tok-kw">int</span> i) {
+    <span class="tok-kw">if</span> (i &gt;= <span class="tok-num">-128</span> &amp;&amp; i &lt;= IntegerCache.high)   <span class="tok-com">// mặc định 127</span>
+        <span class="tok-kw">return</span> IntegerCache.cache[i + <span class="tok-num">128</span>];   <span class="tok-com">// object CHUNG</span>
+    <span class="tok-kw">return new</span> Integer(i);                     <span class="tok-com">// ngoài cache -> mới</span>
+}</code></pre>
+      </div>
+      <pre><code>Integer a = <span class="tok-num">127</span>, b = <span class="tok-num">127</span>;   a == b;  <span class="tok-com">// true  (cache)</span>
+Integer c = <span class="tok-num">128</span>, d = <span class="tok-num">128</span>;   c == d;  <span class="tok-com">// false (2 object)</span></code></pre>
+      <p>Cache -128..127 (chỉnh qua <code>-XX:AutoBoxCacheMax</code>). <code>Long/Short/Byte/Character</code> cũng cache -128..127; <code>Boolean</code> cache cả 2 giá trị.</p>
+      <div class="block pitfall">
+        <div class="block-label">NPE khi unbox null</div>
+        <pre><code><span class="tok-kw">int</span> v = map.<span class="tok-fn">get</span>(<span class="tok-str">"missing"</span>);   <span class="tok-com">// get trả null -> null.intValue() -> NPE</span></code></pre>
+      </div>
+    </section>
+
+    <section id="string">
+      <h2 class="section-title"><span class="num">4</span> String: pool, immutability, nối chuỗi</h2>
+      <div class="block why">
+        <div class="block-label">Immutability thực thi thế nào</div>
+        <p>Field <code>value</code> (byte[] từ J9, trước char[]) là <code>private final</code>, không setter, không leak reference. Class <code>String</code> là <code>final</code> → không kế thừa phá được. J9+ <strong>Compact Strings</strong>: byte[] + coder (LATIN1 1B/char cho ASCII) tiết kiệm ~50% RAM.</p>
+      </div>
+      <pre><code>String s1 = <span class="tok-str">"hi"</span>;              <span class="tok-com">// ldc -> intern tự động, lấy từ pool</span>
+String s2 = <span class="tok-str">"hi"</span>;              <span class="tok-com">// cùng object trong pool</span>
+String s3 = <span class="tok-kw">new</span> String(<span class="tok-str">"hi"</span>);  <span class="tok-com">// object mới trên heap</span>
+s1 == s2;          <span class="tok-com">// true</span>
+s1 == s3;          <span class="tok-com">// false</span>
+s1 == s3.<span class="tok-fn">intern</span>(); <span class="tok-com">// true</span></code></pre>
+      <p>String pool là bảng hash trong <strong>heap</strong> (từ J7; trước ở PermGen). Literal intern tự động lúc class load qua <code>ldc</code> trỏ <code>CONSTANT_String</code>.</p>
+      <div class="block how">
+        <div class="block-label">Nối chuỗi: + biên dịch thành gì</div>
+        <ul>
+          <li>J8: <code>a + b</code> → <code>new StringBuilder().append(a).append(b).toString()</code>.</li>
+          <li>J9+: <code>invokedynamic</code> + <code>StringConcatFactory</code> → JIT sinh chiến lược tối ưu runtime.</li>
+          <li>Trong vòng lặp mỗi <code>+=</code> tạo StringBuilder + String mới → <strong>O(n²)</strong>. Dùng một <code>StringBuilder</code> ngoài loop → O(n).</li>
+        </ul>
+      </div>
+      <table>
+        <tr><th></th><th>Mutable</th><th>Đồng bộ</th><th>Ghi chú</th></tr>
+        <tr><td><code>String</code></td><td>không</td><td>— (immutable)</td><td>mọi thao tác tạo object mới</td></tr>
+        <tr><td><code>StringBuilder</code></td><td>có</td><td>không</td><td>mặc định nối chuỗi 1 thread</td></tr>
+        <tr><td><code>StringBuffer</code></td><td>có</td><td>synchronized</td><td>chậm hơn, hầu như không cần</td></tr>
+      </table>
+    </section>
+
+    <section id="oop">
+      <h2 class="section-title"><span class="num">5</span> OOP internals: dispatch, vtable, init order</h2>
+      <div class="block how">
+        <div class="block-label">Static vs dynamic dispatch</div>
+        <pre><code>Animal a = <span class="tok-kw">new</span> Dog();
+a.<span class="tok-fn">sound</span>();   <span class="tok-com">// "woof" - dynamic dispatch qua vtable của Dog</span></code></pre>
+        <ul>
+          <li>Overriding → <code>invokevirtual</code> tra <strong>vtable</strong> của kiểu runtime (dynamic).</li>
+          <li>Overloading → chọn lúc <strong>compile</strong> theo kiểu tĩnh tham số (static).</li>
+          <li><code>invokeinterface</code> (itable), <code>invokestatic</code>, <code>invokespecial</code> (constructor/private/super).</li>
+        </ul>
+      </div>
+      <div class="dg">
+        <div class="dg-title">Thứ tự khởi tạo (có kế thừa)</div>
+        <div class="dg-row scroll">
+          <div class="node accent">static cha<div class="sub">1 lần khi load</div></div>
+          <div class="node accent">static con</div>
+          <div class="arrow-h"></div>
+          <div class="node green">instance+field cha</div>
+          <div class="node green">ctor cha</div>
+          <div class="node orange">instance+field con</div>
+          <div class="node orange">ctor con</div>
+        </div>
+        <div class="dg-note"><code>new Child()</code> lần đầu → 1,2 (static) rồi 3,4,5,6.</div>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Bẫy: gọi overridable method trong constructor cha</div>
+        <p>Dynamic dispatch gọi vào lớp con <strong>khi field lớp con chưa init</strong> → thấy giá trị mặc định (null/0). Anti-pattern nguy hiểm.</p>
+      </div>
+      <div class="block best">
+        <div class="block-label">Composition over inheritance</div>
+        <p>Kế thừa tạo coupling chặt (fragile base class), lộ toàn bộ API cha, Java chỉ đơn kế thừa. Ưu tiên composition (has-a) + interface trừ khi thực sự "is-a" và ổn định.</p>
+      </div>
+    </section>
+
+    <section id="interface">
+      <h2 class="section-title"><span class="num">6</span> interface vs abstract class</h2>
+      <table>
+        <tr><th></th><th>interface</th><th>abstract class</th></tr>
+        <tr><td>Đa kế thừa</td><td>có (implement nhiều)</td><td>không</td></tr>
+        <tr><td>Field</td><td>chỉ <code>public static final</code></td><td>field bất kỳ (state)</td></tr>
+        <tr><td>Constructor</td><td>không</td><td>có</td></tr>
+        <tr><td>Method có thân</td><td><code>default</code>, <code>static</code>, <code>private</code> (J9+)</td><td>có</td></tr>
+        <tr><td>Khi dùng</td><td>capability/contract</td><td>chia sẻ state + code</td></tr>
+      </table>
+      <div class="block how">
+        <div class="block-label">Default method &amp; diamond</div>
+        <pre><code><span class="tok-kw">interface</span> A { <span class="tok-kw">default</span> String <span class="tok-fn">hi</span>() { <span class="tok-kw">return</span> <span class="tok-str">"A"</span>; } }
+<span class="tok-kw">interface</span> B { <span class="tok-kw">default</span> String <span class="tok-fn">hi</span>() { <span class="tok-kw">return</span> <span class="tok-str">"B"</span>; } }
+<span class="tok-kw">class</span> C <span class="tok-kw">implements</span> A, B {
+    <span class="tok-com">// BẮT BUỘC override, không thì lỗi "inherits unrelated defaults"</span>
+    @Override <span class="tok-kw">public</span> String <span class="tok-fn">hi</span>() { <span class="tok-kw">return</span> A.<span class="tok-kw">super</span>.<span class="tok-fn">hi</span>(); }
+}</code></pre>
+        <p>Default method (J8) để thêm method vào interface không phá code cũ (vd <code>Collection.stream()</code>). Quy tắc: class thắng interface; interface con thắng cha; còn lại override tường minh.</p>
+      </div>
+    </section>
+
+    <section id="contracts">
+      <h2 class="section-title"><span class="num">7</span> equals() &amp; hashCode() – contract sâu</h2>
+      <div class="block purpose">
+        <div class="block-label">5 quy tắc equals + contract hashCode</div>
+        <ul>
+          <li>Reflexive, Symmetric, Transitive, Consistent, và <code>x.equals(null)</code> = false.</li>
+          <li><code>a.equals(b)</code> ⇒ <strong>bắt buộc</strong> <code>a.hashCode()==b.hashCode()</code>. Ngược lại không bắt buộc (collision hợp lệ).</li>
+        </ul>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Vi phạm + bẫy đối xứng khi kế thừa</div>
+        <p>Quên hashCode → 2 object equals rơi bucket khác → <code>get/contains</code> sai. Nếu lớp con thêm field vào equals → <code>parent.equals(child)</code> true nhưng <code>child.equals(parent)</code> false → vỡ symmetric. Giải: composition, hoặc record (final).</p>
+      </div>
+      <pre><code>@Override <span class="tok-kw">public boolean</span> <span class="tok-fn">equals</span>(Object o) {
+    <span class="tok-kw">if</span> (<span class="tok-kw">this</span> == o) <span class="tok-kw">return true</span>;
+    <span class="tok-kw">if</span> (!(o <span class="tok-kw">instanceof</span> User u)) <span class="tok-kw">return false</span>;   <span class="tok-com">// null-safe + type + bind</span>
+    <span class="tok-kw">return</span> id == u.id &amp;&amp; Objects.<span class="tok-fn">equals</span>(email, u.email);
+}
+@Override <span class="tok-kw">public int</span> <span class="tok-fn">hashCode</span>() {
+    <span class="tok-kw">return</span> Objects.<span class="tok-fn">hash</span>(id, email);   <span class="tok-com">// ĐÚNG field như equals</span>
+}</code></pre>
+      <div class="block why">
+        <div class="block-label">Vì sao số 31</div>
+        <p>Lẻ + nguyên tố → phân phối hash tốt. <code>31 * i == (i &lt;&lt; 5) - i</code> nên JIT tối ưu bằng shift-subtract. Object.hashCode mặc định là identity hashCode lưu lazy trong mark word (không phải địa chỉ vì GC di chuyển object).</p>
+      </div>
+    </section>
+
+    <section id="exceptions">
+      <h2 class="section-title"><span class="num">8</span> Exceptions</h2>
+      <div class="dg">
+        <div class="dg-title">Throwable hierarchy</div>
+        <div class="dg-wrap">
+          <div class="node accent">Throwable</div>
+          <div class="arrow-v"></div>
+          <div class="dg-row">
+            <div class="node red">Error<div class="sub">OOM, StackOverflow — không catch</div></div>
+            <div class="node">Exception</div>
+          </div>
+          <div class="arrow-v"></div>
+          <div class="dg-row">
+            <div class="node orange">RuntimeException<div class="sub">unchecked: NPE, IllegalArgument</div></div>
+            <div class="node green">checked<div class="sub">IOException, SQLException</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Chi phí exception</div>
+        <p>Đắt nhất là <code>fillInStackTrace()</code> — chạy khi tạo exception, duyệt cả stack. <code>throw/catch</code> bản thân rẻ. KHÔNG dùng exception cho control flow. Exception "nóng" có thể tắt stack trace:</p>
+        <pre><code><span class="tok-kw">static final class</span> FastEx <span class="tok-kw">extends</span> RuntimeException {
+    <span class="tok-fn">FastEx</span>() { <span class="tok-kw">super</span>(<span class="tok-kw">null</span>, <span class="tok-kw">null</span>, <span class="tok-kw">false</span>, <span class="tok-kw">false</span>); } <span class="tok-com">// writableStackTrace=false</span>
+}</code></pre>
+      </div>
+      <div class="block how">
+        <div class="block-label">try-with-resources &amp; suppressed</div>
+        <pre><code><span class="tok-kw">try</span> (<span class="tok-kw">var</span> a = <span class="tok-fn">open</span>(<span class="tok-str">"A"</span>); <span class="tok-kw">var</span> b = <span class="tok-fn">open</span>(<span class="tok-str">"B"</span>)) {   <span class="tok-com">// đóng ngược: b rồi a</span>
+    <span class="tok-fn">use</span>(a, b);
+}
+<span class="tok-com">// body ném + close() ném -> body là chính, close vào getSuppressed()</span></code></pre>
+      </div>
+      <div class="block best">
+        <div class="block-label">Best practice</div>
+        <ul>
+          <li>Xử lý một lần: log HOẶC rethrow, không cả hai.</li>
+          <li>Wrap giữ cause: <code>new ServiceException("load " + id, e)</code>.</li>
+          <li>Catch cụ thể trước tổng quát; không catch Throwable/Error.</li>
+          <li>Lỗi nghiệp vụ → unchecked (tránh checked lan khắp signature).</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="followup">
+      <h2 class="section-title"><span class="num">9</span> Follow-up questions</h2>
+      <div class="block purpose">
+        <div class="block-label">Interviewer hay đào tiếp</div>
+        <ul>
+          <li><code>new Object()</code> bao nhiêu byte? → 16 (12 header + 4 pad).</li>
+          <li>Identity hashCode lưu ở đâu? → mark word, không phải địa chỉ.</li>
+          <li><code>a+b+c</code> String J8 vs J9? → J8 StringBuilder; J9 invokedynamic một lần.</li>
+          <li>Vì sao Integer cache -128..127? → tối ưu giá trị nhỏ hay dùng.</li>
+          <li>Gọi overridden method trong ctor cha thấy gì? → giá trị mặc định field con.</li>
+          <li>Vì sao record không phá đối xứng equals? → final, equals so tất cả component.</li>
+          <li><code>==</code> bytecode reference vs int? → <code>if_acmp*</code> vs <code>if_icmp*</code>.</li>
+          <li>Compact Strings tiết kiệm gì? → byte[] LATIN1 cho ASCII, ~50% RAM.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Một object rỗng new Object() chiếm bao nhiêu byte?</span><span class="icon">+</span></div>
+        <div class="a"><p>16 byte trên HotSpot 64-bit: 8B mark word + 4B klass pointer (compressed oops) = 12B header, pad lên bội số 8 → 16B. Mọi object alignment 8 byte.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Integer chiếm bao nhiêu byte so với int?</span><span class="icon">+</span></div>
+        <div class="a"><p>int = 4B (primitive). Integer = 12B header + 4B value = 16B object trên heap + reference 4/8B trỏ tới. Autoboxing tốn ~4x bộ nhớ + áp lực GC → tránh trong hot path.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Mark word lưu gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Identity hashCode (lazy, tính lần đầu khi cần), thông tin lock (biased/lightweight/heavyweight), GC age. Không lưu địa chỉ vì GC di chuyển object nhưng hashCode phải ổn định.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao int[] tốt hơn Integer[] trong hot path?</span><span class="icon">+</span></div>
+        <div class="a"><p>int[] lưu 4B/phần tử liền mạch (cache-friendly). Integer[] lưu reference trỏ tới các Integer 16B rải rác → tốn RAM, nhiều cache miss, tăng áp lực GC.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>== biên dịch thành bytecode nào cho reference vs int?</span><span class="icon">+</span></div>
+        <div class="a"><p>Reference → if_acmpeq/if_acmpne (so con trỏ). int → if_icmpeq (so giá trị). .equals() → invokevirtual (dynamic dispatch, chạy code override).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao == trên String/Integer nguy hiểm dù đôi khi đúng?</span><span class="icon">+</span></div>
+        <div class="a"><p>Có thể đúng do trùng string pool hoặc Integer cache → ảo giác code chạy được, rồi vỡ với dữ liệu ngoài pool/cache. Bug âm thầm. Luôn dùng .equals().</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Integer x = 100 compiler chèn gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Integer.valueOf(100). valueOf khác new Integer vì dùng IntegerCache (-128..127) trả object chung. new Integer luôn tạo object mới (đã deprecated).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao Integer 127==127 true nhưng 128==128 false?</span><span class="icon">+</span></div>
+        <div class="a"><p>IntegerCache cache -128..127 nên 127 trả cùng object. 128 ngoài cache → valueOf tạo 2 object khác nhau → == (so địa chỉ) false. Chỉnh được qua -XX:AutoBoxCacheMax.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>int v = map.get(key) khi key không tồn tại?</span><span class="icon">+</span></div>
+        <div class="a"><p>get trả null, autounbox gọi null.intValue() → NullPointerException. Bẫy với Map&lt;_,Integer&gt;. Dùng getOrDefault hoặc kiểm tra null.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>String immutability được thực thi thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Field value (byte[] từ J9) là private final, không setter, không leak reference; class String là final. Nhờ đó thread-safe, cache hashCode, và pool tái dùng an toàn.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>String pool nằm ở đâu? Literal intern khi nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Bảng hash trong heap (từ J7; trước ở PermGen). Literal intern tự động lúc class load qua bytecode ldc trỏ CONSTANT_String. new String() tạo object mới ngoài pool.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>a + b trong vòng lặp vì sao O(n²)? Fix?</span><span class="icon">+</span></div>
+        <div class="a"><p>Mỗi += biên dịch thành StringBuilder mới + toString mới (J8) hoặc invokedynamic (J9+), tạo object trung gian mỗi vòng. Dùng một StringBuilder ngoài loop → O(n).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Compact Strings (Java 9) là gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>String dùng byte[] + coder (LATIN1 1B/char cho ASCII, UTF16 2B cho còn lại) thay char[] cố định 2B → tiết kiệm ~50% RAM cho text ASCII.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>StringBuilder vs StringBuffer?</span><span class="icon">+</span></div>
+        <div class="a"><p>Cả hai mutable. StringBuffer synchronized (thread-safe, chậm hơn); StringBuilder không đồng bộ (nhanh, dùng 1 thread — phổ biến nhất). Nối chuỗi trong loop dùng StringBuilder.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Static dispatch vs dynamic dispatch?</span><span class="icon">+</span></div>
+        <div class="a"><p>Overriding → dynamic dispatch: invokevirtual tra vtable của kiểu runtime lúc chạy. Overloading → static dispatch: chọn method lúc compile theo kiểu tĩnh tham số. invokeinterface tra itable.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Thứ tự khởi tạo class có kế thừa?</span><span class="icon">+</span></div>
+        <div class="a"><p>static cha → static con (1 lần khi load); rồi mỗi new: instance init + field cha → ctor cha → instance init + field con → ctor con.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Gọi method bị override từ constructor lớp cha thấy gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Dynamic dispatch gọi vào lớp con nhưng field lớp con CHƯA init → thấy giá trị mặc định (null/0). Anti-pattern nguy hiểm, tránh gọi overridable method trong constructor.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Diamond problem với default method giải quyết thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Implement 2 interface có default method cùng tên → class BẮT BUỘC override, chọn tường minh bằng A.super.method(). Quy tắc: class thắng interface, interface con thắng cha.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>equals/hashCode contract và hệ quả vi phạm?</span><span class="icon">+</span></div>
+        <div class="a"><p>a.equals(b) ⇒ a.hashCode()==b.hashCode() (ngược lại không bắt buộc). Vi phạm: HashMap tính bucket bằng hashCode, 2 object equals mà hashCode khác rơi bucket khác → get/contains sai.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao dùng số 31 trong hashCode?</span><span class="icon">+</span></div>
+        <div class="a"><p>31 lẻ + nguyên tố → phân phối hash tốt, giảm collision. 31*i == (i&lt;&lt;5)-i nên JIT tối ưu bằng shift+subtract. Là quy ước từ String.hashCode.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Bẫy đối xứng equals khi kế thừa?</span><span class="icon">+</span></div>
+        <div class="a"><p>Nếu lớp con thêm field vào equals, parent.equals(child) có thể true còn child.equals(parent) false → phá symmetric. Giải: composition thay kế thừa, hoặc record (final).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Phần nào của exception đắt nhất?</span><span class="icon">+</span></div>
+        <div class="a"><p>fillInStackTrace() chạy lúc tạo exception, duyệt toàn bộ stack. throw/catch bản thân rẻ. Không dùng exception cho control flow; hot exception tắt stack trace qua constructor super(msg, cause, false, false).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Suppressed exception trong try-with-resources?</span><span class="icon">+</span></div>
+        <div class="a"><p>Resource đóng theo thứ tự ngược khai báo. Nếu body ném exception VÀ close() cũng ném, exception của body là chính, exception của close gắn vào getSuppressed() (không mất).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Checked vs unchecked, khi nào dùng gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Checked (IOException) bị compiler ép handle/throws — lỗi phục hồi được, nhưng lan khắp signature. Unchecked (RuntimeException) — lỗi lập trình. Nhiều codebase (Spring) ưu tiên unchecked cho lỗi nghiệp vụ.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="index.html"><span class="dir">←</span><span class="title">Study Hub</span></a>
+      <a href="week2.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 2 · Generics/Collections</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

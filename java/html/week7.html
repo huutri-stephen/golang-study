@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 7 – Build, Testing &amp; Ecosystem (Deep Dive) | Senior Java</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Java knowledge</div></a>
+      <div class="sub">Deep Dive</div>
+    </div>
+    <h2>Week 7 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#maven">1. Maven</a>
+      <a href="#gradle">2. Gradle</a>
+      <a href="#junit">3. JUnit 5</a>
+      <a href="#mockito">4. Mockito internals</a>
+      <a href="#hikari">5. JDBC &amp; HikariCP</a>
+      <a href="#persistence">6. Persistence context</a>
+      <a href="#nplus1">7. N+1 &amp; fetch</a>
+      <a href="#tx">8. Transaction</a>
+      <a href="#logging">9. Logging &amp; JSON</a>
+      <a href="#followup">10. Follow-up</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html">Week 1 · Core &amp; OOP</a>
+      <a href="week2.html">Week 2 · Generics/Collections</a>
+      <a href="week3.html">Week 3 · Functional/Streams</a>
+      <a href="week4.html">Week 4 · Concurrency</a>
+      <a href="week5.html">Week 5 · JVM/GC</a>
+      <a href="week6.html">Week 6 · Modern Java/IO</a>
+      <a href="week7.html" class="active">Week 7 · Build/Testing</a>
+      <a href="week8.html">Week 8 · Spring/Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 7 · Deep Dive</span>
+      <h1>Build, Testing &amp; Ecosystem</h1>
+      <p>Maven dependency resolution, JUnit 5 extension model, Mockito dùng proxy gì, và trọng tâm backend: persistence context, dirty checking, N+1, fetch strategy.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★</b><span>Priority</span></div>
+        <div class="item"><b>9</b><span>Chủ đề</span></div>
+        <div class="item"><b>~7h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <div class="tldr">
+        <div class="label">TL;DR</div>
+        <ul>
+          <li>Maven nearest-wins; Gradle highest-version; ép version bằng dependencyManagement/BOM.</li>
+          <li>JUnit 5: Platform/Jupiter/Vintage; PER_METHOD instance; extension model.</li>
+          <li>Mockito = ByteBuddy subclass override → không mock được final.</li>
+          <li>Persistence context = L1 cache; dirty checking tự sinh UPDATE (không cần save()).</li>
+          <li>N+1: 1+N query → fix JOIN FETCH/@EntityGraph/@BatchSize.</li>
+          <li>Pool nhỏ đôi khi tốt hơn; @Transactional self-invocation bẫy.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="maven">
+      <h2 class="section-title"><span class="num">1</span> Maven</h2>
+      <p>Lifecycle: <code>validate → compile → test → package → verify → install → deploy</code>. Chạy phase nào thì mọi phase trước chạy theo.</p>
+      <table>
+        <tr><th>Scope</th><th>compile</th><th>test</th><th>runtime</th><th>đóng gói</th><th>Ví dụ</th></tr>
+        <tr><td>compile (default)</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>thư viện chính</td></tr>
+        <tr><td>provided</td><td>✓</td><td>✓</td><td>✗</td><td>✗</td><td>servlet API</td></tr>
+        <tr><td>runtime</td><td>✗</td><td>✓</td><td>✓</td><td>✓</td><td>JDBC driver</td></tr>
+        <tr><td>test</td><td>✗</td><td>✓</td><td>✗</td><td>✗</td><td>JUnit, Mockito</td></tr>
+      </table>
+      <div class="block how"><div class="block-label">Dependency resolution: nearest-wins</div><p>Transitive dependency tự kéo theo. Hai đường dẫn cùng thư viện khác version → Maven chọn version ở <b>độ sâu nhỏ nhất</b> (nearest-wins); cùng độ sâu thì khai báo trước thắng. Ép version bằng <code>&lt;dependencyManagement&gt;</code> hoặc import <b>BOM</b>. Khác Gradle (highest-version).</p></div>
+    </section>
+
+    <section id="gradle">
+      <h2 class="section-title"><span class="num">2</span> Gradle</h2>
+      <div class="grid-2">
+        <div class="col"><h4>Maven</h4><p>XML khai báo, lifecycle cố định, dễ học.</p></div>
+        <div class="col"><h4>Gradle</h4><p>Script Groovy/Kotlin, task-based DAG (chỉ chạy task cần), incremental build (input không đổi → UP-TO-DATE), build cache + daemon → nhanh hơn cho project lớn.</p></div>
+      </div>
+    </section>
+
+    <section id="junit">
+      <h2 class="section-title"><span class="num">3</span> JUnit 5</h2>
+      <div class="block purpose"><div class="block-label">Kiến trúc 3 phần</div><p><b>Platform</b> (nền chạy test, launcher), <b>Jupiter</b> (API viết test mới + extension), <b>Vintage</b> (chạy JUnit 3/4 cũ).</p></div>
+      <pre><code>@ParameterizedTest
+@CsvSource({ <span class="tok-str">"100,gold,80"</span>, <span class="tok-str">"100,silver,90"</span> })
+<span class="tok-kw">void</span> <span class="tok-fn">discount</span>(<span class="tok-kw">int</span> price, String tier, <span class="tok-kw">int</span> expected) {
+    <span class="tok-fn">assertEquals</span>(expected, Discount.<span class="tok-fn">apply</span>(price, tier));
+}</code></pre>
+      <ul>
+        <li>Mặc định <b>PER_METHOD</b>: mỗi test method một instance mới → cô lập. <code>@TestInstance(PER_CLASS)</code> cho @BeforeAll non-static.</li>
+        <li>Extension model thay Runner/Rule của JUnit 4: <code>@ExtendWith(MockitoExtension.class)</code>, <code>SpringExtension</code>. <code>assertAll</code> gom nhiều assert.</li>
+      </ul>
+    </section>
+
+    <section id="mockito">
+      <h2 class="section-title"><span class="num">4</span> Mockito internals</h2>
+      <div class="block how">
+        <div class="block-label">Cách tạo mock</div>
+        <p>Dùng <b>ByteBuddy</b> (trước CGLIB) sinh <b>subclass</b> runtime của class được mock, override method để trả stub/ghi tương tác. Vì thế <b>không mock được final class/method</b> (không override được) trừ khi bật <code>mockito-inline</code>.</p>
+      </div>
+      <pre><code>@ExtendWith(MockitoExtension.<span class="tok-kw">class</span>)
+<span class="tok-kw">class</span> UserServiceTest {
+    @Mock UserRepo repo;                <span class="tok-com">// mock rỗng</span>
+    @InjectMocks UserService service;   <span class="tok-com">// inject @Mock vào (ctor→setter→field)</span>
+    @Test <span class="tok-kw">void</span> t() {
+        <span class="tok-fn">when</span>(repo.<span class="tok-fn">findById</span>(<span class="tok-num">1L</span>)).<span class="tok-fn">thenReturn</span>(user);  <span class="tok-com">// stub</span>
+        <span class="tok-fn">verify</span>(repo, <span class="tok-fn">times</span>(<span class="tok-num">1</span>)).<span class="tok-fn">findById</span>(<span class="tok-num">1L</span>);        <span class="tok-com">// verify</span>
+    }
+}</code></pre>
+      <p><code>@Spy</code> bọc object thật, chỉ stub method chỉ định (còn lại chạy thật). Test pyramid: nhiều unit &gt; ít integration &gt; rất ít e2e.</p>
+    </section>
+
+    <section id="hikari">
+      <h2 class="section-title"><span class="num">5</span> JDBC &amp; HikariCP</h2>
+      <div class="block why"><div class="block-label">Vì sao connection pool</div><p>Tạo connection DB tốn kém: TCP + TLS + auth + session DB (ms–chục ms). Pool giữ sẵn connection mở, tái sử dụng → giảm latency đột biến. HikariCP nhanh nhờ <code>ConcurrentBag</code> lock-free.</p></div>
+      <div class="block pitfall"><div class="block-label">Pool lớn KHÔNG luôn tốt hơn</div><p>Nhiều connection hơn số DB xử lý được → context switch + lock contention ở DB → chậm hơn. Pool nhỏ (10-20) thường tốt hơn. Tham khảo PostgreSQL: <code>connections ≈ core*2 + spindle</code>. Đo thực nghiệm. <code>maxLifetime</code> tái tạo connection cũ tránh bị DB/LB đóng ngầm.</p></div>
+    </section>
+
+    <section id="persistence">
+      <h2 class="section-title"><span class="num">6</span> Hibernate: persistence context</h2>
+      <div class="block purpose"><div class="block-label">Persistence context = L1 cache</div><p>EntityManager/Session quản lý persistence context: bộ nhớ đệm entity managed trong 1 transaction. Query cùng entity 2 lần → lần 2 lấy từ context (không query lại). L1 cache luôn bật, phạm vi transaction.</p></div>
+      <div class="dg">
+        <div class="dg-title">Entity lifecycle states</div>
+        <div class="dg-row scroll">
+          <div class="node muted">new/transient</div>
+          <div class="arrow-h acc"><span class="arrow-lbl">persist</span></div>
+          <div class="node green">managed<div class="sub">dirty checking</div></div>
+          <div class="arrow-h acc"><span class="arrow-lbl">detach/close</span></div>
+          <div class="node orange">detached</div>
+        </div>
+      </div>
+      <div class="block how">
+        <div class="block-label">Dirty checking</div>
+        <pre><code>@Transactional <span class="tok-kw">void</span> <span class="tok-fn">changeEmail</span>(<span class="tok-kw">long</span> id, String email) {
+    User u = em.<span class="tok-fn">find</span>(User.<span class="tok-kw">class</span>, id);   <span class="tok-com">// managed</span>
+    u.<span class="tok-fn">setEmail</span>(email);                    <span class="tok-com">// chỉ set field</span>
+    <span class="tok-com">// KHÔNG cần save() -> flush lúc commit tự sinh UPDATE</span>
+}</code></pre>
+        <p>Hibernate chụp snapshot entity managed lúc load; lúc flush so state hiện tại với snapshot → tự sinh UPDATE cho field đổi.</p>
+      </div>
+      <div class="block why"><div class="block-label">flush vs commit; L1 vs L2</div><p><b>flush</b>: đồng bộ xuống DB (chạy SQL) nhưng chưa commit (tự động trước query + lúc commit). <b>commit</b>: flush + kết thúc transaction. <b>L1</b> per-transaction luôn bật; <b>L2</b> (@Cacheable + Ehcache/Caffeine) chia sẻ giữa session, phải cấu hình.</p></div>
+    </section>
+
+    <section id="nplus1">
+      <h2 class="section-title"><span class="num">7</span> N+1 &amp; fetch strategies</h2>
+      <div class="dg">
+        <div class="dg-title">N+1: 1 query chính + N query lazy</div>
+        <div class="dg-row scroll">
+          <div class="node accent">1 query<div class="sub">N orders</div></div>
+          <div class="arrow-h red"></div>
+          <div class="node red">N queries<div class="sub">user từng order (lazy)</div></div>
+          <div class="arrow-h grn"></div>
+          <div class="node green">FIX: 1-2 query<div class="sub">JOIN FETCH / @BatchSize</div></div>
+        </div>
+      </div>
+      <table>
+        <tr><th>Cách fix</th><th>Ghi chú</th></tr>
+        <tr><td><code>JOIN FETCH</code> (JPQL)</td><td>1 query; cẩn thận nhân bản với nhiều collection</td></tr>
+        <tr><td><code>@EntityGraph</code></td><td>khai báo đồ thị fetch, dùng lại được</td></tr>
+        <tr><td><code>@BatchSize(n)</code></td><td>gom N query lazy thành ⌈N/n⌉ query IN(...)</td></tr>
+      </table>
+      <div class="block pitfall"><div class="block-label">Fetch type mặc định + LazyInitializationException</div><p>@ManyToOne/@OneToOne mặc định <b>EAGER</b>; @OneToMany/@ManyToMany mặc định <b>LAZY</b>. LAZY trả proxy → truy cập sau khi session đóng ném <code>LazyInitializationException</code>. Không dùng EAGER bừa (tải dư + Cartesian product).</p></div>
+    </section>
+
+    <section id="tx">
+      <h2 class="section-title"><span class="num">8</span> Transaction &amp; isolation</h2>
+      <div class="block pitfall">
+        <div class="block-label">Bẫy @Transactional</div>
+        <ul>
+          <li><b>Self-invocation</b>: gọi method @Transactional trong cùng class → không qua proxy → vô hiệu.</li>
+          <li>Method private/non-public → proxy không chặn → vô hiệu.</li>
+          <li>Checked exception mà quên <code>rollbackFor</code> → commit dù có lỗi.</li>
+          <li>Nuốt exception bên trong → transaction không thấy lỗi → không rollback.</li>
+        </ul>
+      </div>
+      <div class="block how"><div class="block-label">Propagation</div><p><b>REQUIRED</b> (mặc định): join hoặc tạo mới. <b>REQUIRES_NEW</b>: suspend cái cũ, tạo transaction mới độc lập (audit log commit dù transaction ngoài rollback). <b>NESTED</b>: savepoint. Isolation: READ_COMMITTED (mặc định), REPEATABLE_READ, SERIALIZABLE.</p></div>
+    </section>
+
+    <section id="logging">
+      <h2 class="section-title"><span class="num">9</span> Logging &amp; JSON</h2>
+      <div class="block how"><div class="block-label">SLF4J facade</div><p>SLF4J là API trừu tượng; binding runtime: Logback (mặc định Spring Boot) hoặc Log4j2. Log <b>parameterized</b>: <code>log.info("user {} did {}", uid, action)</code> — chỉ nối chuỗi khi level bật. Không <code>log.debug("..." + heavy())</code>.</p></div>
+      <div class="block pitfall"><div class="block-label">Jackson: không serialize entity trực tiếp</div><p>ObjectMapper thread-safe (tái dùng singleton). Bẫy: circular reference (2 entity trỏ nhau) → StackOverflow; lazy proxy → lỗi/tải dư. <b>Map sang DTO</b>, hoặc @JsonIgnore/@JsonManagedReference.</p></div>
+    </section>
+
+    <section id="followup">
+      <h2 class="section-title"><span class="num">10</span> Follow-up questions</h2>
+      <div class="block purpose">
+        <div class="block-label">Interviewer hay đào tiếp</div>
+        <ul>
+          <li>Maven resolve conflict thế nào? → nearest-wins; ép bằng dependencyManagement/BOM.</li>
+          <li>JUnit 5 tạo mấy instance test? → PER_METHOD (cô lập).</li>
+          <li>Mockito tạo mock bằng gì? Vì sao không mock final? → ByteBuddy subclass; final không override.</li>
+          <li>Vì sao pool nhỏ đôi khi tốt hơn? → nhiều connection hơn DB xử lý được gây contention.</li>
+          <li>Persistence context là gì? → L1 cache per-transaction, dirty checking.</li>
+          <li>Vì sao set field mà không save vẫn update? → dirty checking trên entity managed lúc flush.</li>
+          <li>LazyInitializationException khi nào? → truy cập lazy sau khi session đóng.</li>
+          <li>N+1 và cách fix? → JOIN FETCH/@EntityGraph/@BatchSize.</li>
+          <li>Bẫy @Transactional self-invocation? → gọi trong cùng class bỏ qua proxy.</li>
+          <li>Vì sao không serialize entity ra JSON? → lazy proxy + circular reference; dùng DTO.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Maven resolve version conflict thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Nearest-wins: chọn version ở độ sâu nhỏ nhất trong cây dependency; cùng độ sâu thì khai báo trước thắng. Ép version bằng dependencyManagement hoặc import BOM. Khác Gradle (highest-version wins).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Dependency scope của Maven?</span><span class="icon">+</span></div>
+        <div class="a"><p>compile (mọi nơi, mặc định), provided (compile+test, không đóng gói - servlet API), runtime (không cần compile - JDBC driver), test (chỉ test - JUnit/Mockito). Scope quyết định classpath ở từng giai đoạn.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Gradle nhanh hơn Maven nhờ gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Task-based DAG chỉ chạy task cần thiết; incremental build (input không đổi → UP-TO-DATE, bỏ qua); build cache tái dùng output giữa máy/CI; daemon. Đổi lại script phức tạp hơn XML khai báo của Maven.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>JUnit 5 gồm mấy phần?</span><span class="icon">+</span></div>
+        <div class="a"><p>Platform (nền chạy test, launcher), Jupiter (API viết test mới + extension), Vintage (chạy test JUnit 3/4 cũ).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>JUnit 5 tạo bao nhiêu instance test?</span><span class="icon">+</span></div>
+        <div class="a"><p>Mặc định PER_METHOD: mỗi test method một instance mới → cô lập trạng thái. @TestInstance(PER_CLASS) dùng một instance cho cả class (cho phép @BeforeAll non-static).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Extension model của JUnit 5 thay gì của JUnit 4?</span><span class="icon">+</span></div>
+        <div class="a"><p>Thay Runner + Rule bằng Extension interface (BeforeEachCallback, ParameterResolver...). @ExtendWith(MockitoExtension.class) cắm Mockito, @ExtendWith(SpringExtension.class) cho Spring Test. assertAll gom nhiều assert báo tất cả lỗi.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Mockito tạo mock bằng cách nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Dùng ByteBuddy (trước CGLIB) sinh subclass runtime của class được mock, override method để trả stub/ghi tương tác. Vì thế không mock được final class/method (không override được) trừ khi dùng mockito-inline.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>@Mock vs @InjectMocks vs @Spy?</span><span class="icon">+</span></div>
+        <div class="a"><p>@Mock tạo mock rỗng. @InjectMocks tạo instance thật của class test và tự inject các @Mock (constructor→setter→field). @Spy bọc object thật, chỉ stub method chỉ định, còn lại chạy thật.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao không mock được final method?</span><span class="icon">+</span></div>
+        <div class="a"><p>Mockito tạo subclass và override; final method không override được. Cần mockito-inline (bytecode instrumentation) hoặc thiết kế test qua interface. Static/private cũng cần mockito-inline (mockStatic).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao luôn dùng connection pool?</span><span class="icon">+</span></div>
+        <div class="a"><p>Tạo connection DB tốn kém (TCP + TLS + auth + session DB, hàng ms). Pool giữ sẵn connection mở tái sử dụng → giảm latency. HikariCP nhanh nhờ ConcurrentBag lock-free.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Pool lớn có luôn tốt hơn không?</span><span class="icon">+</span></div>
+        <div class="a"><p>Không. Nhiều connection hơn số DB xử lý được → context switch + lock contention ở DB → chậm hơn. Pool nhỏ (10-20) thường tốt hơn. Tham khảo: connections ≈ core*2 + spindle. Đo thực nghiệm.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>maxLifetime của pool để làm gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Tái tạo connection sau một khoảng thời gian, tránh dùng connection cũ đã bị DB/load balancer đóng ngầm (gây "connection reset"). Nên đặt nhỏ hơn timeout của DB/LB.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Persistence context là gì?</span><span class="icon">+</span></div>
+        <div class="a"><p>Bộ nhớ đệm entity managed trong một transaction (L1 cache, luôn bật). Query cùng entity 2 lần trong 1 transaction → lần 2 lấy từ context, không query DB lại. EntityManager/Session quản lý nó.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Dirty checking hoạt động thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Hibernate chụp snapshot entity managed lúc load. Lúc flush/commit, so sánh state hiện tại với snapshot, tự sinh UPDATE cho field đã đổi. Nên chỉ cần setField() trong transaction, KHÔNG cần gọi save().</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao set field entity ngoài transaction không update DB?</span><span class="icon">+</span></div>
+        <div class="a"><p>Ngoài transaction entity ở trạng thái detached, không được persistence context theo dõi → không dirty checking → không sinh UPDATE. Phải merge lại vào một transaction.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>flush vs commit?</span><span class="icon">+</span></div>
+        <div class="a"><p>flush đồng bộ persistence context xuống DB (chạy SQL) nhưng chưa commit transaction; xảy ra tự động trước query và lúc commit. commit = flush + kết thúc transaction (DB commit thật).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>L1 vs L2 cache?</span><span class="icon">+</span></div>
+        <div class="a"><p>L1 = persistence context, per-transaction, luôn bật. L2 = second-level cache (@Cacheable + Ehcache/Caffeine), chia sẻ giữa các session/transaction, phải cấu hình, cẩn thận invalidation.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>N+1 problem và cách fix?</span><span class="icon">+</span></div>
+        <div class="a"><p>1 query lấy N entity + N query lazy lấy association từng cái = 1+N query. Fix: JOIN FETCH (JPQL), @EntityGraph (khai báo đồ thị fetch), @BatchSize (gom thành query IN). Không dùng EAGER bừa.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Fetch type mặc định của các association?</span><span class="icon">+</span></div>
+        <div class="a"><p>@ManyToOne và @OneToOne mặc định EAGER. @OneToMany và @ManyToMany (collection) mặc định LAZY. LAZY trả proxy; truy cập sau khi session đóng → LazyInitializationException.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>LazyInitializationException xảy ra khi nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>Truy cập một lazy association sau khi persistence context (session/transaction) đã đóng → proxy không thể load. Fix: fetch trong transaction (JOIN FETCH/@EntityGraph) hoặc map sang DTO trong transaction.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Bẫy @Transactional self-invocation?</span><span class="icon">+</span></div>
+        <div class="a"><p>Gọi method @Transactional từ method khác TRONG CÙNG class → không qua proxy Spring → annotation không có tác dụng (không mở transaction). Lỗi phổ biến nhất với Spring AOP. Tách sang bean khác hoặc self-inject.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Propagation REQUIRED vs REQUIRES_NEW?</span><span class="icon">+</span></div>
+        <div class="a"><p>REQUIRED (mặc định): join transaction hiện có hoặc tạo mới. REQUIRES_NEW: luôn tạo transaction mới, suspend cái đang chạy (dùng cho audit log cần commit độc lập dù transaction ngoài rollback).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao không serialize entity Hibernate ra JSON trực tiếp?</span><span class="icon">+</span></div>
+        <div class="a"><p>Lazy association là proxy → serialize gây LazyInitializationException hoặc tải dư; circular reference (2 entity trỏ nhau) gây StackOverflow. Nên map sang DTO. Dùng @JsonIgnore/@JsonManagedReference nếu buộc.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao log parameterized log.info("x={}", x) tốt hơn nối chuỗi?</span><span class="icon">+</span></div>
+        <div class="a"><p>Chỉ format/nối chuỗi khi log level được bật. log.debug("..." + heavy()) luôn tính heavy() dù debug tắt. Parameterized tránh chi phí thừa và an toàn hơn.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="week6.html"><span class="dir">← Trước</span><span class="title">Week 6 · Modern Java/IO</span></a>
+      <a href="week8.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 8 · Spring/Mock</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

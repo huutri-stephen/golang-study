@@ -131,12 +131,15 @@ Tổng quan mục tiêu + **cây thư mục** (ASCII, có comment mỗi mục) +
 
 ### Assets dùng chung
 
-Copy nguyên `html/assets/style.css` và `html/assets/app.js` từ repo Go. Đây là dark theme
-hoàn chỉnh; **rebrand** cho ngôn ngữ mới chỉ cần đổi biến `--accent` (và tuỳ chọn `--accent-2/3`)
-trong `:root` của `style.css` — ví dụ Rust dùng cam `#dea584`, Python xanh `#4b8bbe`.
+> ⚠️ **Quan trọng**: KHÔNG giả định đã có sẵn `style.css`/`app.js`. Ở project mới hai file này
+> chưa tồn tại → phải tạo mới. Toàn bộ nội dung CSS/JS + template trang nằm **tự chứa** trong
+> steering `#html-study-hub`. Khi cần dựng lớp HTML, kích hoạt steering đó và copy nguyên văn
+> các khối CSS/JS/template từ nó.
 
-`app.js` cung cấp: click câu hỏi để mở/đóng flashcard (`.flashcard.open`), nút `toggleAll(this)`,
-highlight nav theo scroll (dựa vào `section[id]` + `.sidebar nav a[href^="#"]`). Không cần sửa.
+`style.css` là dark theme hoàn chỉnh; **rebrand** cho ngôn ngữ mới chỉ cần đổi biến `--accent`
+(và tuỳ chọn `--accent-2/3`) trong `:root` — ví dụ Rust cam `#dea584`, Python xanh `#4b8bbe`.
+`app.js` cung cấp: click mở/đóng flashcard, nút `toggleAll(this)`, highlight nav theo scroll —
+không cần sửa.
 
 ### Bộ class có sẵn (dùng lại, đừng tự chế class mới)
 

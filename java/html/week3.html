@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Week 3 – Functional &amp; Streams (Deep Dive) | Senior Java</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <a href="index.html"><div class="logo">Java knowledge</div></a>
+      <div class="sub">Deep Dive</div>
+    </div>
+    <h2>Week 3 · Contents</h2>
+    <nav>
+      <a href="#overview">Overview &amp; TL;DR</a>
+      <a href="#lambda">1. Lambda invokedynamic</a>
+      <a href="#capture">2. Capture &amp; effectively final</a>
+      <a href="#fi">3. Functional interfaces</a>
+      <a href="#methodref">4. Method reference</a>
+      <a href="#pipeline">5. Stream pipeline internals</a>
+      <a href="#lazy">6. Lazy &amp; short-circuit</a>
+      <a href="#collectors">7. Collectors sâu</a>
+      <a href="#optional">8. Optional</a>
+      <a href="#parallel">9. Parallel &amp; ForkJoinPool</a>
+      <a href="#followup">10. Follow-up</a>
+      <a href="#flashcards">Flashcards</a>
+    </nav>
+    <h2>All Weeks</h2>
+    <nav>
+      <a href="week1.html">Week 1 · Core &amp; OOP</a>
+      <a href="week2.html">Week 2 · Generics/Collections</a>
+      <a href="week3.html" class="active">Week 3 · Functional/Streams</a>
+      <a href="week4.html">Week 4 · Concurrency</a>
+      <a href="week5.html">Week 5 · JVM/GC</a>
+      <a href="week6.html">Week 6 · Modern Java/IO</a>
+      <a href="week7.html">Week 7 · Build/Testing</a>
+      <a href="week8.html">Week 8 · Spring/Mock</a>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="hero">
+      <span class="week-badge">Week 3 · Deep Dive</span>
+      <h1>Functional Programming &amp; Streams</h1>
+      <p>Lambda KHÔNG phải anonymous class (invokedynamic + LambdaMetafactory); Stream pipeline chạy bằng Spliterator + Sink; ForkJoinPool chung ảnh hưởng khi parallel.</p>
+      <div class="meta">
+        <div class="item"><b>★★★★</b><span>Priority</span></div>
+        <div class="item"><b>9</b><span>Chủ đề</span></div>
+        <div class="item"><b>~7h</b><span>Đề xuất</span></div>
+      </div>
+    </div>
+
+    <section id="overview">
+      <h2 class="section-title"><span class="num">i</span> Overview &amp; TL;DR</h2>
+      <div class="tldr">
+        <div class="label">TL;DR</div>
+        <ul>
+          <li>Lambda = <code>invokedynamic</code> + <code>LambdaMetafactory</code>, không sinh class con lúc compile.</li>
+          <li>Stateless lambda được reuse (theo call site); capturing lambda tạo instance mới.</li>
+          <li>Stream: Spliterator + Sink, xử lý <strong>chiều dọc</strong>, không collection trung gian.</li>
+          <li>Lazy + short-circuit (findFirst/limit); stateful op (sorted/distinct/limit) là rào cản.</li>
+          <li>Collector 4 phần; <code>toMap</code> trùng key cần merge function.</li>
+          <li>parallelStream chạy ForkJoinPool.commonPool → tránh trong web request.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="lambda">
+      <h2 class="section-title"><span class="num">1</span> Lambda: invokedynamic</h2>
+      <div class="block pitfall">
+        <div class="block-label">Sai lầm phổ biến</div>
+        <p>"Lambda là đường tắt của anonymous inner class" — <strong>KHÔNG đúng</strong>.</p>
+      </div>
+      <div class="grid-2">
+        <div class="col"><h4>Anonymous class</h4><p>Sinh <b>class file riêng</b> (<code>Outer$1.class</code>) lúc compile, <code>new Outer$1()</code> lúc runtime.</p></div>
+        <div class="col"><h4>Lambda</h4><p>Compiler tạo <code>invokedynamic</code> call site + method <code>lambda$main$0</code>. Lần đầu chạy, bootstrap <code>LambdaMetafactory.metafactory</code> sinh lớp implement rồi cache.</p></div>
+      </div>
+      <div class="block why">
+        <div class="block-label">Vì sao thiết kế vậy</div>
+        <p>Không nổ số class file (mỗi lambda 1 class như anonymous → tăng load + metaspace). JVM tự do chọn chiến lược tạo instance: lambda <b>không capture</b> được reuse cùng instance (theo call site); có capture thì tạo mới giữ biến (closure).</p>
+      </div>
+    </section>
+
+    <section id="capture">
+      <h2 class="section-title"><span class="num">2</span> Capture &amp; effectively final</h2>
+      <pre><code><span class="tok-kw">int</span> base = <span class="tok-num">10</span>;                          <span class="tok-com">// effectively final</span>
+Function&lt;Integer,Integer&gt; f = x -&gt; x + base;   <span class="tok-com">// capture base bằng giá trị</span>
+<span class="tok-com">// base = 20; -> LỖI COMPILE: must be effectively final</span></code></pre>
+      <ul>
+        <li>Lambda capture biến local <strong>bằng giá trị</strong> (copy vào field ẩn). Local trên stack có thể biến mất trước lambda → phải copy.</li>
+        <li>Cấm gán lại để tránh nhập nhằng giá trị giữa lambda và code ngoài.</li>
+        <li>Capture <code>this</code>/field → capture reference → lambda giữ object bao ngoài (có thể leak nếu sống lâu).</li>
+      </ul>
+    </section>
+
+    <section id="fi">
+      <h2 class="section-title"><span class="num">3</span> Functional interfaces</h2>
+      <table>
+        <tr><th>Interface</th><th>Method</th><th>Ghi chú</th></tr>
+        <tr><td><code>Function&lt;T,R&gt;</code></td><td><code>R apply(T)</code></td><td>andThen, compose</td></tr>
+        <tr><td><code>Supplier&lt;T&gt;</code></td><td><code>T get()</code></td><td>lazy, factory</td></tr>
+        <tr><td><code>Consumer&lt;T&gt;</code></td><td><code>void accept(T)</code></td><td>andThen</td></tr>
+        <tr><td><code>Predicate&lt;T&gt;</code></td><td><code>boolean test(T)</code></td><td>and/or/negate</td></tr>
+        <tr><td><code>UnaryOperator&lt;T&gt;</code></td><td><code>T apply(T)</code></td><td>Function&lt;T,T&gt;</td></tr>
+        <tr><td><code>BinaryOperator&lt;T&gt;</code></td><td><code>T apply(T,T)</code></td><td>dùng trong reduce</td></tr>
+      </table>
+      <div class="block best">
+        <div class="block-label">Biến thể primitive (tránh boxing)</div>
+        <p><code>IntFunction</code>, <code>ToIntFunction</code>, <code>IntStream</code>... tránh autobox Integer trong hot path. <code>mapToInt(User::age).sum()</code> không box, có sum/average sẵn.</p>
+      </div>
+    </section>
+
+    <section id="methodref">
+      <h2 class="section-title"><span class="num">4</span> Method reference (4 loại)</h2>
+      <table>
+        <tr><th>Loại</th><th>Cú pháp</th><th>Tương đương lambda</th></tr>
+        <tr><td>static</td><td><code>Integer::parseInt</code></td><td><code>s -&gt; Integer.parseInt(s)</code></td></tr>
+        <tr><td>instance object cụ thể</td><td><code>out::println</code></td><td><code>x -&gt; out.println(x)</code></td></tr>
+        <tr><td>instance kiểu tham số</td><td><code>String::toUpperCase</code></td><td><code>s -&gt; s.toUpperCase()</code></td></tr>
+        <tr><td>constructor</td><td><code>ArrayList::new</code></td><td><code>() -&gt; new ArrayList&lt;&gt;()</code></td></tr>
+      </table>
+    </section>
+
+    <section id="pipeline">
+      <h2 class="section-title"><span class="num">5</span> Stream pipeline internals</h2>
+      <div class="block how">
+        <div class="block-label">3 thành phần</div>
+        <ul>
+          <li><b>Source</b> → tạo <b>Spliterator</b> (<code>tryAdvance</code> duyệt, <code>trySplit</code> chia đôi cho parallel).</li>
+          <li><b>Intermediate ops</b> → xâu chuỗi các <b>Sink</b> (lazy, chưa chạy).</li>
+          <li><b>Terminal op</b> → đẩy từng phần tử qua chuỗi Sink.</li>
+        </ul>
+      </div>
+      <div class="dg">
+        <div class="dg-title">Xử lý theo chiều dọc (không collection trung gian)</div>
+        <div class="dg-row scroll">
+          <div class="node accent">phần tử</div>
+          <div class="arrow-h acc"></div>
+          <div class="node">filter</div>
+          <div class="arrow-h acc"></div>
+          <div class="node">map</div>
+          <div class="arrow-h acc"></div>
+          <div class="node green">collect</div>
+        </div>
+        <div class="dg-note">Mỗi phần tử đi dọc qua toàn bộ chuỗi Sink MỘT lần, không phải filter tất cả rồi map tất cả → tiết kiệm bộ nhớ + cho phép short-circuit.</div>
+      </div>
+      <div class="block pitfall">
+        <div class="block-label">Stateful vs stateless</div>
+        <p>Stateless (<code>map/filter/peek</code>) xử lý độc lập. Stateful (<code>sorted/distinct/limit</code>) cần buffer/nhìn nhiều phần tử → tạo rào cản (barrier), giảm hiệu quả parallel. <code>sorted</code> phải gom hết mới sort.</p>
+      </div>
+    </section>
+
+    <section id="lazy">
+      <h2 class="section-title"><span class="num">6</span> Lazy evaluation &amp; short-circuit</h2>
+      <pre><code>Stream.<span class="tok-fn">of</span>(<span class="tok-str">"a"</span>, <span class="tok-str">"bb"</span>, <span class="tok-str">"ccc"</span>, <span class="tok-str">"dddd"</span>)
+    .<span class="tok-fn">filter</span>(s -&gt; { print(<span class="tok-str">"filter "</span> + s); <span class="tok-kw">return</span> s.length() &gt; <span class="tok-num">1</span>; })
+    .<span class="tok-fn">map</span>(s -&gt; { print(<span class="tok-str">"map "</span> + s); <span class="tok-kw">return</span> s.toUpperCase(); })
+    .<span class="tok-fn">findFirst</span>();
+<span class="tok-com">// filter a, filter bb, map bb  -> DỪNG (không đụng ccc, dddd)</span></code></pre>
+      <p>Không có terminal op → không chạy gì. Short-circuit: <code>findFirst</code>, <code>findAny</code>, <code>anyMatch</code>, <code>allMatch</code>, <code>limit</code> → dừng sớm nhờ lazy.</p>
+    </section>
+
+    <section id="collectors">
+      <h2 class="section-title"><span class="num">7</span> Collectors sâu</h2>
+      <pre><code><span class="tok-com">// groupingBy + downstream</span>
+Map&lt;String,Long&gt; c = users.stream()
+    .<span class="tok-fn">collect</span>(<span class="tok-fn">groupingBy</span>(User::city, <span class="tok-fn">counting</span>()));
+<span class="tok-com">// toMap + merge (tránh IllegalStateException khi trùng key)</span>
+.<span class="tok-fn">collect</span>(<span class="tok-fn">toMap</span>(User::name, User::age, (a, b) -&gt; a));</code></pre>
+      <div class="block how">
+        <div class="block-label">Collector là gì bên dưới (4 phần)</div>
+        <p><b>supplier</b> (tạo container), <b>accumulator</b> (thêm phần tử), <b>combiner</b> (gộp 2 container khi parallel — phải associative), <b>finisher</b> (biến đổi cuối). Hiểu điều này giúp viết custom collector.</p>
+      </div>
+      <div class="block pitfall"><div class="block-label">Bẫy toMap trùng key</div><p><code>toMap</code> không merge function → <code>IllegalStateException</code> khi 2 phần tử cùng key. Luôn cung cấp merge function nếu key có thể trùng.</p></div>
+    </section>
+
+    <section id="optional">
+      <h2 class="section-title"><span class="num">8</span> Optional đúng cách</h2>
+      <div class="proscons">
+        <div class="pros"><h4>Đúng</h4><ul><li><code>opt.map(...).orElse(default)</code></li><li><code>opt.ifPresentOrElse(...)</code></li><li><code>opt.orElseThrow(...)</code></li></ul></div>
+        <div class="cons"><h4>Sai</h4><ul><li><code>opt.get()</code> không check → NoSuchElementException</li><li>Optional làm field/tham số (không Serializable)</li><li><code>Optional&lt;List&gt;</code> (trả list rỗng)</li></ul></div>
+      </div>
+      <p>Optional là <strong>kiểu trả về</strong> biểu diễn "có thể không có", không phải công cụ chống null khắp nơi.</p>
+    </section>
+
+    <section id="parallel">
+      <h2 class="section-title"><span class="num">9</span> Parallel stream &amp; ForkJoinPool</h2>
+      <div class="block why">
+        <div class="block-label">Chạy trên đâu</div>
+        <p><code>parallelStream()</code> dùng <b>ForkJoinPool.commonPool()</b> — chung toàn JVM (size = cores-1). Chia việc bằng <code>trySplit</code> (fork/join + work-stealing), gộp bằng combiner.</p>
+      </div>
+      <div class="proscons">
+        <div class="pros"><h4>Hiệu quả khi</h4><ul><li>Data lớn + thao tác nặng, độc lập</li><li>Nguồn dễ chia (ArrayList/array)</li><li>Không shared mutable state</li></ul></div>
+        <div class="cons"><h4>KHÔNG nên khi</h4><ul><li>Trong web request (chiếm common pool)</li><li>Data nhỏ / thao tác nhẹ (overhead &gt; lợi ích)</li><li>Nguồn khó chia (LinkedList/IO)</li></ul></div>
+      </div>
+      <pre><code><span class="tok-com">// Nếu bắt buộc parallel: dùng ForkJoinPool riêng</span>
+ForkJoinPool pool = <span class="tok-kw">new</span> ForkJoinPool(<span class="tok-num">4</span>);
+pool.<span class="tok-fn">submit</span>(() -&gt; list.<span class="tok-fn">parallelStream</span>()...).<span class="tok-fn">get</span>();</code></pre>
+    </section>
+
+    <section id="followup">
+      <h2 class="section-title"><span class="num">10</span> Follow-up questions</h2>
+      <div class="block purpose">
+        <div class="block-label">Interviewer hay đào tiếp</div>
+        <ul>
+          <li>Lambda có phải anonymous class? → Không; invokedynamic + LambdaMetafactory.</li>
+          <li>Lambda tạo object mới mỗi lần? → không capture reuse; có capture tạo mới.</li>
+          <li>Vì sao capture phải effectively final? → capture bằng copy giá trị.</li>
+          <li>Stream có collection trung gian giữa op không? → không, đi dọc qua chuỗi Sink.</li>
+          <li>Stateful op nào gây rào cản? → sorted, distinct, limit.</li>
+          <li>4 thành phần Collector? → supplier, accumulator, combiner, finisher.</li>
+          <li>toMap trùng key nổ gì? → IllegalStateException; cung cấp merge function.</li>
+          <li>parallelStream chạy pool nào? → ForkJoinPool.commonPool; tránh web request.</li>
+          <li>Vì sao IntStream tốt hơn Stream&lt;Integer&gt;? → không boxing, có sum/average.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="flashcards">
+      <h2 class="section-title"><span class="num">?</span> Flashcards</h2>
+      <button class="toggle-all" onclick="toggleAll(this)">Expand all</button>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Lambda có phải đường tắt của anonymous inner class không?</span><span class="icon">+</span></div>
+        <div class="a"><p>Không. Anonymous class sinh class file riêng (Outer$1.class). Lambda dùng invokedynamic + bootstrap LambdaMetafactory.metafactory sinh lớp implement lúc runtime lần đầu rồi cache. Không sinh class con lúc compile, tránh nổ số class file.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Lambda có tạo object mới mỗi lần đánh giá không?</span><span class="icon">+</span></div>
+        <div class="a"><p>Lambda KHÔNG capture (stateless): JVM thường tái dùng cùng 1 instance (theo call site). Lambda có capture: tạo instance mới giữ biến bắt được (như closure). Stateless lambda gần như miễn phí.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao lambda capture phải effectively final?</span><span class="icon">+</span></div>
+        <div class="a"><p>Lambda capture biến local bằng cách copy giá trị (local trên stack có thể biến mất trước khi lambda chạy). Cấm gán lại để tránh nhập nhằng giá trị giữa lambda và code ngoài.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Lambda trong instance method capture gì? Rủi ro?</span><span class="icon">+</span></div>
+        <div class="a"><p>Capture reference tới this (object bao ngoài) khi dùng field/method của nó. Nếu lambda sống lâu (đăng ký listener) có thể giữ object bao ngoài không cho GC → memory leak.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Vì sao có biến thể IntFunction, ToIntFunction, IntStream?</span><span class="icon">+</span></div>
+        <div class="a"><p>Tránh autoboxing Integer trong hot path. Stream&lt;Integer&gt; box/unbox mỗi phần tử tốn RAM và GC; IntStream lưu int nguyên thuỷ, có sum/average sẵn. mapToInt để chuyển.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>4 loại method reference?</span><span class="icon">+</span></div>
+        <div class="a"><p>static (Integer::parseInt), instance của object cụ thể (out::println), instance của kiểu tham số (String::toUpperCase), constructor (ArrayList::new).</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Stream chạy thế nào bên dưới?</span><span class="icon">+</span></div>
+        <div class="a"><p>Source tạo Spliterator (tryAdvance duyệt, trySplit chia đôi). Intermediate op xâu chuỗi các Sink (lazy). Terminal op đẩy từng phần tử qua chuỗi Sink. Không tạo collection trung gian giữa các op.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>filter().map().collect() có tạo list sau mỗi op không?</span><span class="icon">+</span></div>
+        <div class="a"><p>Không. Mỗi phần tử đi DỌC qua toàn bộ chuỗi Sink một lần (filter→map→collect), không phải filter tất cả rồi map tất cả. Nhờ đó tiết kiệm bộ nhớ và cho phép short-circuit.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Stateful vs stateless intermediate op?</span><span class="icon">+</span></div>
+        <div class="a"><p>Stateless (map/filter/peek) xử lý độc lập từng phần tử. Stateful (sorted/distinct/limit) cần buffer/nhìn nhiều phần tử, tạo rào cản trong pipeline, giảm hiệu quả (đặc biệt parallel). sorted phải gom hết mới sort.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Lazy evaluation nghĩa là gì trong Stream?</span><span class="icon">+</span></div>
+        <div class="a"><p>Intermediate op không chạy tới khi có terminal op. Kết hợp xử lý theo chiều dọc + short-circuit (findFirst/limit/anyMatch) cho phép dừng sớm, bỏ qua phần tử thừa.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Collector gồm những phần nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>supplier (tạo container), accumulator (thêm phần tử), combiner (gộp 2 container khi parallel), finisher (biến đổi cuối). Combiner phải associative để parallel đúng.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>toMap trùng key gây gì? Cách xử lý?</span><span class="icon">+</span></div>
+        <div class="a"><p>IllegalStateException (duplicate key). Cung cấp merge function: toMap(k, v, (a,b)-&gt;a) để chọn giá trị khi trùng, hoặc (a,b)-&gt;b, hoặc gộp.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>groupingBy trả gì, lồng được không?</span><span class="icon">+</span></div>
+        <div class="a"><p>Map&lt;K, List&lt;T&gt;&gt; mặc định. Downstream: groupingBy(city, counting()) → Map&lt;String,Long&gt;. Lồng nhiều tầng: groupingBy(city, groupingBy(isAdult)) → Map&lt;String, Map&lt;Boolean, List&gt;&gt;.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Optional dùng sai như thế nào?</span><span class="icon">+</span></div>
+        <div class="a"><p>get() không check (NoSuchElementException), Optional làm field/tham số (không Serializable, sai ý định), Optional&lt;List&gt; (nên trả list rỗng), if(isPresent())get() thay map/orElse. Optional chỉ nên là kiểu trả về "có thể không có".</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>parallelStream chạy trên pool nào? Rủi ro?</span><span class="icon">+</span></div>
+        <div class="a"><p>ForkJoinPool.commonPool() chung toàn JVM (size = cores-1). Trong web request, parallel stream chiếm common pool → chặn request khác → giảm throughput toàn app. Nếu cần, dùng ForkJoinPool riêng qua submit().get().</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>Khi nào KHÔNG nên parallel stream?</span><span class="icon">+</span></div>
+        <div class="a"><p>Data nhỏ / thao tác nhẹ (overhead chia+gộp &gt; lợi ích), có shared mutable state/side effect, nguồn khó chia (LinkedList/IO), hoặc trong web request. Chỉ hiệu quả với data lớn + thao tác nặng độc lập + nguồn dễ chia.</p></div></div>
+
+      <div class="flashcard"><div class="q"><span><span class="qmark">Q</span>forEach vs forEachOrdered trên parallel stream?</span><span class="icon">+</span></div>
+        <div class="a"><p>forEach không đảm bảo thứ tự (chạy song song). forEachOrdered giữ thứ tự gặp (encounter order) nhưng mất phần lớn lợi ích song song. Muốn kết quả có thứ tự thường dùng collect thay forEach.</p></div></div>
+    </section>
+
+    <div class="page-nav">
+      <a href="week2.html"><span class="dir">← Trước</span><span class="title">Week 2 · Generics/Collections</span></a>
+      <a href="week4.html" class="next"><span class="dir">Tiếp theo →</span><span class="title">Week 4 · Concurrency</span></a>
+    </div>
+  </main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>
